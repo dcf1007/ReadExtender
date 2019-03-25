@@ -61,23 +61,29 @@ def count(cpus, messages):
 	global readsCounter
 
 	start_time = time.time()
-	start_reads = sum(readsCounter[:])
+	if(cpus > 1):
+		start_reads = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
+	else:
+		start_reads = sum(readsCounter[:]) - readsCounter[0]
+
 	while True:
 		if(cpus > 1):
 			reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
 			reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
 			reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
 			reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
+			reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
 		else:
 			reads_added = readsCounter[1]
 			reads_identical = readsCounter[2]
 			reads_extended = readsCounter[3]
 			reads_error = readsCounter[4]
-		reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
+			reads_total = sum(readsCounter[:]) - readsCounter[0]
 		if not messages.empty():
 			while not messages.empty():
 				print(messages.get(), end="")
 		print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
+		time.sleep(0.1)
 	return True
 
 def gzCompress(nameList):
@@ -292,23 +298,24 @@ def processReads(byteString):
 			if name in p_error:
 				p_error[name].append((seq,qual))
 				private_counter[3] += 1 #error
+				print("Added error in initial p_error ", name)
 			elif name in s_error:
 				#We do not append the errors to s_error directly because we identify in which file they were found once the results are returned
 				#p_error[name] = s_error[name]
 				p_error[name] = [(seq,qual)]
 				private_counter[3] += 1 #error
+				print("Added error in initial s_error ", name)
 				
-			'''
 			#Check if SEQ and QUAL have different lengths
 			elif (len(seq) != len(qual)):
 				#As in this case it does not mean a discrepance between sequences but a problem in
 				#The source file, if the read is present in the shared_data, it will stay and this
 				#Read will simply be ignored and not counted at all.
-				#print("Error: SEQ and QUAL have different lenghts.")
-			else:
-			'''
+				print("\n\n\nError: SEQ and QUAL have different lenghts.\n\n\n")
+			
 			#Only process if SEQ and QUAL are well-formed
-			if (len(seq) == len(qual)):
+			#if len(seq) == len(qual):
+			else:
 				#Verify the name starts with @ as a FASTQ read should
 				#We need to extract it as a range instead of just the first character to
 				#get a byte string and not an int representing the chararcter.
@@ -341,7 +348,9 @@ def processReads(byteString):
 						p_error[name]=[(seq,qual), p_read]
 						p_data.pop(name)
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
-						private_counter[3] += 1 #error
+						print("Added error in dedupe private ", name)
+						private_counter[3] += 2 #error
+						private_counter[0] -= 1 #error
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 				else:
 				#If not in p_data, check if it's in s_data.
@@ -363,6 +372,7 @@ def processReads(byteString):
 							p_error[name]=[(seq,qual)]
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							private_counter[3] += 1 #error
+							print("Added error in dedupe shared ", name)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							#pass
 					else:
@@ -372,12 +382,13 @@ def processReads(byteString):
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						private_counter[0] += 1 #added
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
-						
 			#print("leaving if (len(seq) == len(qual))")
 		#When while reaches EOF
 		#else:
 			#print(os.getpid(),"EOF reached with while")
 			#pass
+		del p_read
+		del s_read
 	#print("leaving function")
 	#Save in the shared dictionary, for which we have to lock it.
 	#Ideally no duplicate items must be found and the saving process should be smooth.
@@ -393,10 +404,13 @@ def processReads(byteString):
 		#print(readsCounter[:])
 	results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 	
+	del p_data
+	del p_error
+	gc.collect()
+	
 	with readsCounterLock:
 		readsCounter[procID] = 0
-	#print(readsCounter[:])
-	#time.sleep(1)
+		
 	return results
 
 def init_processReads(readsCounter_, readsCounterLock_):
@@ -417,15 +431,15 @@ def gzip_nochunks_byte_u3():
 		filename = pathlib.Path(filepath).name
 		print("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
-			with multiprocessing.Pool(cpus+1) as pool:
+			with multiprocessing.Pool(cpus+1) as gzfile_pool:
 				multiple_results=[]
 				for i in range(cpus+1):
 					print("sending job: ", i, end="\r")
-					multiple_results.append(pool.apply_async(getChunk,args=(filepath,i,cpus)))
+					multiple_results.append(gzfile_pool.apply_async(getChunk,args=(filepath,i,cpus)))
 					#pool.apply_async(getChunk,args=(filepath,my_shared_list,i,cpus))
 				print("")
 				#print("Closing pool")
-				pool.close()
+				gzfile_pool.close()
 				while True:
 					pFinished=0
 					for res in multiple_results:
@@ -435,14 +449,20 @@ def gzip_nochunks_byte_u3():
 						print("Loaded")
 						break
 				#print("Joining pool")
-				pool.join()
-			print("Merging file")
-			for result in multiple_results:
-				chunk=result.get()
-				gzfile.seek(chunk[0])
-				gzfile.write(chunk[1])
+				gzfile_pool.join()
+				print("Merging file")
+				for result in multiple_results:
+					chunk=result.get()
+					gzfile.seek(chunk[0])
+					gzfile.write(chunk[1])
+				
+				del chunk
+				del multiple_results
+			
 			c_size = gzfile.seek(0,2)
+			
 			gzfile.seek(0)
+			
 			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
 				print("Estimating compression ratio", end="\r")
 				#Seek the first 10MB (10485760 bytes) of uncompressed data
@@ -626,6 +646,9 @@ def gzip_nochunks_byte_u3():
 										break
 							#print("inner wall exit")
 					sprint("100%")
+					del v_block
+					del chunk
+					
 					#print("Closing pool")
 					pool.close()
 					sprint("Waiting for results to be ready")
@@ -637,6 +660,26 @@ def gzip_nochunks_byte_u3():
 							if((res.ready()==True) and (pFinished[index] == 0)):
 								p_data, p_error = pickle.loads(zlib.decompress(res.get()))
 								#TODO: The saving code goes in here
+								#0a. If a read is in p_data and u_error, transfer it to p_error
+								duplicate_Enames = u_error.keys() & p_data.keys()
+								for Ename in duplicate_Enames:
+									p_error[Ename] = [p_data[Ename]]
+									p_data.pop(Ename)
+									readsCounter[(cpus*5) + 3] += 1 #error
+									readsCounter[(cpus*5)] -= 1 #Substract the read from added
+									print("Added error in u_error p_data ", Ename)
+								
+								#0b If a read is in u_data and p_error, transfer it to u_error.
+								duplicate_Enames = p_error.keys() & u_data.keys()
+								for Ename in duplicate_Enames:
+									u_error[Ename] = [u_data[Ename]]
+									u_data.pop(Ename)
+									readsCounter[(cpus*5) + 3] += 1 #error
+									readsCounter[(cpus*5)] -= 1 #Substract the read from added
+									print("Added error in p_error u_data ", Ename)
+									
+								#At this stage, names in u_data and p_data are guaranteed not to be in p_error or u_error
+								
 								#1. Create intersection between shared and private
 								duplicate_names = u_data.keys() & p_data.keys()
 								sprint("Found ", len(duplicate_names), " duplicates")
@@ -652,14 +695,15 @@ def gzip_nochunks_byte_u3():
 										readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 										#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 									else:
-										#TODO this should be added to the existing list
-										p_error[name]=[p_data[name], u_data[name]]
+										#If it was in u_data and in p_data, it shouldn't exist in p_error or u_error
+										#Make an assert in here "name in p_error or u_error"
+										p_error[name]=[p_data[name]]
 										p_data.pop(name)
+										u_error[name]=[u_data[name]]
 										u_data.pop(name)
-										readsCounter[(cpus*5) + 3] += 1 #error
-										#private_counter[3] += 1 #error
-									readsCounter[(cpus*5)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
-									#private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+										readsCounter[(cpus*5) + 3] += 2 #error
+										print("Added error in u_data p_data ", name)
+									readsCounter[(cpus*5)] -= 2 #Substract the read from added as it has been added to either identical, extended or error
 								
 								duplicate_Enames = u_error.keys() & p_error.keys()
 								for Ename in duplicate_Enames:
@@ -685,7 +729,11 @@ def gzip_nochunks_byte_u3():
 					pool.join()
 					#print("outer wall exit")
 					sprint("Updating the shared dictionary")
-					counter.terminate()
+					while messages.empty() == False:
+						pass
+					else:
+						sprint("")
+						counter.terminate()
 					print("")
 					print(len(u_data))
 					s_data.update(u_data)
@@ -701,6 +749,9 @@ def gzip_nochunks_byte_u3():
 									s_error[Ename][previous_filename] = list()
 								s_error[Ename][previous_filename].append(s_data[Ename])
 							s_data.pop(Ename)
+							readsCounter[(cpus*5) + 3] += 1 #error
+							readsCounter[(cpus*5)] -= 1 #Substract the read from added
+							
 						if filename not in s_error[Ename]:
 							s_error[Ename][filename] = list()
 						s_error[Ename][filename].extend(u_error[Ename])
@@ -711,7 +762,7 @@ def gzip_nochunks_byte_u3():
 					del u_data
 					del u_error
 					del multiple_results
-				gc.collect()
+					gc.collect()
 		print("LOADED")
 		previous_filenames.append(filename)
 	#Write the output to disk
@@ -743,11 +794,15 @@ def gzip_nochunks_byte_u3():
 		error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
 		if(os.path.isdir(error_dir) == False):
 			os.mkdir(error_dir)
+		error_files = dict()
+		for filename in previous_filenames:
+			error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
 		for name in s_error:
 			for filename in s_error[name]:
-				with gzip.open(error_dir + "/" + filename, 'a+b') as f:
-					for read in s_error[name][filename]:
-						f.write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
+				for read in s_error[name][filename]:
+					error_files[filename].write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
+		for filename in error_files:
+			error_files[filename].close()
 	
 	print (time.strftime("%c"))
 	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
