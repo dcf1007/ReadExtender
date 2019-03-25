@@ -393,7 +393,7 @@ def processReads(byteString):
 	with readsCounterLock:
 		readsCounter[procID] = 0
 	
-	#print(procID, " Finished")
+	print(procID, " Finished")
 	
 	return True
 
@@ -408,21 +408,34 @@ def init_processReads(readsCounter_, readsCounterLock_, q_data_, q_error_):
 class updateShared:
 	
 	_updater = None
-	
 	_running = False
+	
+	u_data = dict()
+	u_error = dict()
 	
 	def start(self):
 		if self._updater:
 			if(self._updater.isAlive() == True):
 				return
+		self.u_data = dict()
+		self.u_error = dict()
 		self._updater = threading.Thread(target=self._updateShared, name="updateShared")
 		self._updater.setDaemon(True)
 		self._updater.start()
 		
 	def stop(self):
+		print("Waiting for the queues to be empty")
+		while not (q_error.empty() and q_data.empty()):
+			print(int(q_error.qsize() + q_data.qsize()))
+			time.sleep(0.1)
+		print("Queues empty")
 		print("trying to stop")
 		self._running = False
+		self._updater.join()
 
+	def results(self):
+		return (self.u_data, self.u_error)
+		
 	def _updateShared(self):
 		#TODO: Pass the values "properly"
 		self._running = True
@@ -430,35 +443,60 @@ class updateShared:
 		global s_data, s_error
 		global q_data, q_error
 		
-		p_data = dict()
-		p_error = dict()
-		
-		u_data = dict()
-		u_error = dict()
-		
 		print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
-			print(self._running)
-			ne=0
-			while not q_error.empty():
-				if ne == 0:
-					ne = 1
-					print("not empty: ", q_error.qsize(), "     ")
-				p_error.update((q_data.get(),))
 			
-			ne=0
-			while not q_data.empty():
-				if ne == 0:
-					ne = 1
-					print("not empty: ", q_data.qsize(), "     ")
-				p_data.update((q_data.get(),))
+			while not q_error.empty():
+				e_name, e_reads = q_error.get()
 				
+				#0 Add e_name to self.u_error
+				self.u_error.setdefault(e_name,list()).extend(e_reads)
+				readsCounter[(cpus*5) + 3] += 1 #error
+				
+				#1 If a e_name is in self.u_data, transfer it to self.u_error.
+				if e_name in self.u_data:
+					self.u_error[e_name].append(self.u_data[e_name])
+					self.u_data.pop(e_name)
+					readsCounter[(cpus*5) + 3] += 1 #error
+					readsCounter[(cpus*5)] -= 1 #Substract the read from added
+					print("Added error in e_name self.u_data ", e_name)
+					
+			while not q_data.empty():
+				name, read = q_data.get()
+
+				#2. If name is in self.u_error, transfer read to self.u_error
+				if name in self.u_error:
+					self.u_error[name].append(read)
+					readsCounter[(cpus*5) + 3] += 1 #error
+					readsCounter[(cpus*5)] -= 1 #Substract the read from added
+					print("Added error in self.u_error name ", name)
+					
+				#At this stage, names in self.u_data are guaranteed not to be in  self.u_error
+				#3. Dedupe whatever is in self.u_data and update the read value
+				elif name in self.u_data:
+					sprint("Found duplicate: ", name)
+					deduped = dedupe(read[0], read[1], self.u_data[name])
+					if deduped:
+						#Only rewrite the read if it has been extended.
+						if(deduped[0] == 2):
+							p_data[name]=deduped[1]
+						readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+						#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+					else:
+						self.u_error.setdefault(name,list()).append(self.u_data[name], read)
+						self.u_data.pop(name)
+						readsCounter[(cpus*5) + 3] += 2 #error
+						print("Added error in self.u_data p_data ", name)
+					readsCounter[(cpus*5)] -= 1 #or is 2? #Substract the read from added as it has been added to either identical, extended or error
+				else:
+					self.u_data[name] = read
+			
 			print("empty")
-			ne = 0
 			time.sleep(1)
 		
 		print(threading.currentThread().getName(), " Leaving")
+		return True
 			
 if __name__ == '__main__':
 
@@ -728,74 +766,16 @@ if __name__ == '__main__':
 					while True:
 						for index, res in enumerate(multiple_results):
 							if((res.ready()==True) and (pFinished[index] == 0)):
-								#p_data, p_error = pickle.loads(zlib.decompress(res.get()))
-								#p_data, p_error = pickle.loads(res.get())
-								#TODO: The saving code goes in here
-								#0a. If a read is in p_data and u_error, transfer it to p_error
-								duplicate_Enames = u_error.keys() & p_data.keys()
-								for Ename in duplicate_Enames:
-									p_error[Ename] = [p_data[Ename]]
-									p_data.pop(Ename)
-									readsCounter[(cpus*5) + 3] += 1 #error
-									readsCounter[(cpus*5)] -= 1 #Substract the read from added
-									print("Added error in u_error p_data ", Ename)
-								
-								#0b If a read is in u_data and p_error, transfer it to u_error.
-								duplicate_Enames = p_error.keys() & u_data.keys()
-								for Ename in duplicate_Enames:
-									u_error[Ename] = [u_data[Ename]]
-									u_data.pop(Ename)
-									readsCounter[(cpus*5) + 3] += 1 #error
-									readsCounter[(cpus*5)] -= 1 #Substract the read from added
-									print("Added error in p_error u_data ", Ename)
-									
-								#At this stage, names in u_data and p_data are guaranteed not to be in p_error or u_error
-								
-								#1. Create intersection between shared and private
-								duplicate_names = u_data.keys() & p_data.keys()
-								sprint("Found ", len(duplicate_names), " duplicates")
-								#2. Dedupe whatever is in the intersection and update in the private
-								for name in duplicate_names:
-									deduped = dedupe(p_data[name][0], p_data[name][0], u_data[name])
-									if deduped:
-										#Only rewrite the read if it has been extended. If identical, pop from p_data.
-										if(deduped[0] == 2):
-											p_data[name]=deduped[1]
-										else:
-											p_data.pop(name)
-										readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-										#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-									else:
-										#If it was in u_data and in p_data, it shouldn't exist in p_error or u_error
-										#Make an assert in here "name in p_error or u_error"
-										p_error[name]=[p_data[name]]
-										p_data.pop(name)
-										u_error[name]=[u_data[name]]
-										u_data.pop(name)
-										readsCounter[(cpus*5) + 3] += 2 #error
-										print("Added error in u_data p_data ", name)
-									readsCounter[(cpus*5)] -= 2 #Substract the read from added as it has been added to either identical, extended or error
-								
-								duplicate_Enames = u_error.keys() & p_error.keys()
-								for Ename in duplicate_Enames:
-									u_error[Ename].extend(p_error[Ename])
-									p_error.pop(Ename)
-									
-								#3. Update the file data with the private data
-								sprint("Updating the file dictionary")
-								u_data.update(p_data)
-								u_error.update(p_error)
-								del p_data
-								del p_error
-								sprint(index, "Ready")
-							
 								pFinished[index] = int(res.ready())
+								print(res.get())
 								sprint(sum(pFinished), "/", len(multiple_results))
 						if sum(pFinished) == len(multiple_results):
 							sprint("DONE")
 							sprint(readsCounter[:])
+							updater.stop()
 							break
-						time.sleep(1)
+						else:
+							time.sleep(1)
 					sprint("Joining pool")
 					pool.join()
 					#print("outer wall exit")
@@ -806,34 +786,34 @@ if __name__ == '__main__':
 						sprint("")
 						counter.terminate()
 					print("")
-					print(len(u_data))
-					s_data.update(u_data)
+					print(len(updater.u_data))
+					s_data.update(updater.u_data)
 					
-					for Ename in u_error:
+					for Ename in updater.u_error:
 						#1. Check whether the entry exists already in the dictioniary
 						#2. If it doesn't exist define a dictionary for it
 						if Ename not in s_error:
 							s_error[Ename] = dict()
 						if Ename in s_data:
 							for previous_filename in previous_filenames:
-								if previous_filename not in s_error[Ename]:
-									s_error[Ename][previous_filename] = list()
-								s_error[Ename][previous_filename].append(s_data[Ename])
+								s_error[Ename].setdefault(previous_filename,list()).append(s_data[Ename])
 							s_data.pop(Ename)
 							readsCounter[(cpus*5) + 3] += 1 #error
 							readsCounter[(cpus*5)] -= 1 #Substract the read from added
 							
-						if filename not in s_error[Ename]:
-							s_error[Ename][filename] = list()
-						s_error[Ename][filename].extend(u_error[Ename])
+						s_error[Ename].setdefault(filename, list()).extend(updater.u_error[Ename])
 						#u_error.pop(Ename)
 						
 					#3. Check whether there's an entry for the filename
 					#4. If it doesn't exist create the entry and define an empty list on it
-					del u_data
-					del u_error
 					del multiple_results
 					gc.collect()
+					
+					
+					self.u_error.extend(e_reads)
+
+					
+					
 		print("LOADED")
 		previous_filenames.append(filename)
 	#Write the output to disk
