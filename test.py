@@ -617,19 +617,30 @@ def gzip_nochunks_byte_u3():
 					s_error.update(u_error)
 		print("LOADED")
 	#Write the output to disk
-	'''
-	with multiprocessing.Pool(3) as pool:
-		pool.map(save4, dict(data),100)
+	
+	with multiprocessing.Pool(cpus) as pool:
+		multiple_results = []
+		s_data_keys = list(s_data.keys())
+		ks = len(s_data_keys)
+		tot = 0
+		for i in range(cpus):
+			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
+			multiple_results.append(pool.apply_async(save4,args=(slice,)))
+			tot += len(slice)
+		print(tot)
 		print("Closing pool")
 		pool.close()
 		print("Joining pool")
 		pool.join()
-	'''
-
+		with open('all_final.fastq.gz', 'wb') as fh:
+			for res in multiple_results:
+				fh.write(res.get())
+			fh.close()
+	
 	print (time.strftime("%c"))
 	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
-	print("Saving to disk")
-	print(timeit.Timer(save1).timeit(number=1))
+	#print("Saving to disk")
+	#print(timeit.Timer(save1).timeit(number=1))
 	#print(timeit.Timer(save2).timeit(number=1))
 	#print(timeit.Timer(save3).timeit(number=1))
 	#data={}
@@ -662,10 +673,15 @@ def save3():
 		with open('all_3.fastq.gz', 'wb') as fh:
 			fh.write(gzfileStream.getvalue())
 			fh.close()
-
-def save4(iter):
-	print("hjgj: ")
 '''
+def save4(nameList):
+	global s_data
+	gzfileStream = io.BytesIO()
+	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
+		for name in nameList:
+			gzfile.write(name+b"\n"+s_data[name][0]+b"\n+\n"+s_data[name][1]+b"\n")
+	return gzfileStream.getvalue()
+
 ncbu3=timeit.Timer(gzip_nochunks_byte_u3).timeit(number=1)
 
 print("ncbu3=",ncbu3)
