@@ -296,15 +296,13 @@ def processReads(chunk):
 	#del zByteString
 	#sprint("v_block decompressed")
 	
-	byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]]
-	
 	#Load the byteString into a byteStream to loop over it
-	with io.BytesIO(byteString) as file:
+	with io.BytesIO(loadedFASTQ.value) as file:
 		#Make sure we are at the beginning of the stream.
-		file.seek(0)
+		file.seek(chunk[0])
 		
 		#Execute until we reach the EOF
-		while file.tell() < len(byteString): 
+		while file.tell() < chunk[1]: 
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
 				readsCounter[procID + 1] += private_counter[0]
@@ -438,7 +436,7 @@ def processReads(chunk):
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 		
-	q_data.put(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
+	q_data.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
 	#q_data.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
@@ -519,8 +517,9 @@ class updateShared:
 		#print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
-					
+			sprint("U_files left: ", q_data.qsize())
 			while q_data.empty() == False:
+				sprint("U_files left: ", q_data.qsize())
 				#name, read = q_data.get()
 				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
 				#p_data, p_error = pickle.loads(q_data.get())
@@ -574,7 +573,7 @@ class updateShared:
 		return
 
 
-def decompressChunks(rawValue):
+def decompressChunks(filepath, rawValue):
 	'''
 	This function works around the structure of a FASTQ read to know whether it is inside a read or not.
 	A fastq read is structured in blocks of 4 lines as follows:
@@ -598,99 +597,140 @@ def decompressChunks(rawValue):
 	v_block and start a new v_block
 
 	'''
+	content = io.BytesIO()
 	#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
 	#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 	#can always happen that we underestimate the size and a cpus+1 chunks are generated.
 	#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
 	#file = io.BytesIO(rawValue)
-	with io.BytesIO(rawValue.value) as file:
-		f_size = file.seek(0,2)
-		sprint("File size: ", f_size)
-		file.seek(0)
+	with open(filepath, 'rb') as gzfile:
+		sprint("Estimating compression ratio", end="\r")
+		#Seek the first 10MB (10485760 bytes) of uncompressed data
+		gz_size = gzfile.seek(0, 2)
+		gzfile.seek(0)
 		
-		if (f_size / cpus) > 3*1024*1024*1024:
-			buffersize = 3*1024*1204*1024
-		else:
-			buffersize = math.ceil(f_size / cpus)
+		sprint("Compressed file size: ", gz_size)
+
+		with gzip.open(gzfile, 'rb') as file:
+		
+			file.seek(10*1024*1024)
 			
-		sprint("Using chunk size of: ", buffersize)
-		
-		print("Processing")
-		#Initialise v_block
-
-		offset_0 = 0
-		offset = buffersize
-		peek_size = 10*1024
-		chunks = list()
-		while True:
-			#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
-			#If there was a previous v_block, this is the last chunk of the file
-			#If it was the last chunk, it will be taken care later in the code
-			if offset_0 == 0 and offset > f_size:
-				print("File read in one chunk")
-				chunks.append((offset_0,f_size))
-				return chunks
-			elif f_size > offset_0 and offset > f_size:
-				print("EOF reached")
-				chunks.append((offset_0,f_size))
-				return chunks
-			#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
-			#as the chunk may be ending in the middle of a sequence, and that's not good.
+			gz_ratio = gzfile.tell()/file.tell()
+			
+			f_size = gz_size/gz_ratio
+			
+			file.seek(0)
+			gzfile.seek(0)
+			
+			sprint("Estimated compression ratio:",round(gz_ratio, 2))
+			sprint("Approx. decompressed file size: ", round(f_size/(1024*1024)), " MB")
+			
+			if (f_size/cpus) > 3*1024*1024*1024:
+				buffersize = 3*1024*1204*1024
 			else:
+				buffersize = math.ceil(f_size/cpus)
+				
+			sprint("Using chunk size of: ", buffersize)
+			
+			sprint("Decompressing and generating chunks")
+			
+			offset_0 = 0
+			offset = buffersize
+			peek_size = 10*1024
+			chunks = list()
+			peek_buffer = b''
+			while True:
+				#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
+				#If there was a previous v_block, this is the last chunk of the file
+				#If it was the last chunk, it will be taken care later in the code
+				if offset_0 == 0 and offset > f_size:
+					print("File read in one chunk")
+					#as the f_size is approximate, read all to reach the end of the file
+					#empty first whatever is left into the peek_buffer
+					rawValue.value = peek_buffer + file.read()
+					print("transfering the results: ", (offset_0,file.tell()))
+					chunks.append((offset_0, file.tell()))
+					return chunks
+				elif f_size > offset_0 and offset > f_size:
+					print("EOF reached")
+					content.write(peek_buffer)
+					content.write(file.read())
+					rawValue.value = content.getvalue()
+					print("transfering the results: ", (offset_0,file.tell()))
+					chunks.append((offset_0, file.tell()))
+					return chunks
+				#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
+				#as the chunk may be ending in the middle of a sequence, and that's not good.
+				else:
 
-				#Find the first line that starts with "+" which will be our seed and store its position
-				print("Seeking offset ", offset)
-				file.seek(offset)
-				print("Peeking 10MB data")
-				peek_buffer = file.read(peek_size)
-				print(len(peek_buffer))
-				print("Searching the + line")
-				seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-							
-				#This loop allows to scan the chunk until the boundaries of the read have been determined
-				while True:
-					#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
-					if seed == 0:
-						print("+ line not found in peek data, extending peek")
-						#Append the chunk to the existing v_block
-						#v_block += chunk
-						print("Peeking 10MB more of data")
-						peek_buffer += file.read(peek_size)
-						print("Searching the + line")
-						seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-						print(len(peek_buffer))
-					
-					#If a seed was found, we need to find the boundaries of the read where the seed is
-					else:
-						print("+ found at: ", seed)
-						
-						#Find the first line that starts with "@" between the offset and the seed which will be the start of
-						#a new read and store its position
-						newblock = peek_buffer[:seed].rfind(b"\n@") + 1
-						
-						#If there was no line starting with "@" between the offset and the seed
-						if newblock == 0:
-							print("@ not found in peek data. Moving offset to seed point")
-							#Set the offset one character after the seed position to start the seed search again
-							offset += seed
-							
-						#If there was a line starting with "@" between the offset and the seed
-						else:
-							print("@ found at: ", newblock)
-							
-							#Exclude the newline character from the newblock position. At the moment, newblock contains the
-							#newline character used in the search, which doesn't correspond to the beginning of the new read
-							#and needs to be excluded in the new v_block.
-							offset += newblock
-							print("transfering the results: ", (offset_0,offset))
-							chunks.append((offset_0,offset))
-							print("Loading new offsets")
-							offset_0 = offset
-							offset = offset_0 + buffersize
-						break
+					#Find the first line that starts with "+" which will be our seed and store its position
+					print("Seeking offset ", offset)
+					content.write(peek_buffer)
+					content.write(file.read(offset - offset_0 - len(peek_buffer)))
+					sprint(file.tell(), "=", offset, "=", content.tell())
+					print("Peeking 10MB data")
+					peek_buffer = file.read(peek_size)
+					print(len(peek_buffer))
+					print("Searching the + line")
+					seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
 								
-					#print("inner wall exit")
-		#sprint("100%")
+					#This loop allows to scan the chunk until the boundaries of the read have been determined
+					while True:
+						#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
+						if seed == 0:
+							print("+ line not found in peek data, extending peek")
+							#Append the chunk to the existing v_block
+							#v_block += chunk
+							print("Peeking 10MB more of data")
+							peek_buffer += file.read(peek_size)
+							print("Searching the + line")
+							seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
+							print(len(peek_buffer))
+						
+						#If a seed was found, we need to find the boundaries of the read where the seed is
+						else:
+							print("+ found at: ", seed)
+							
+							#Find the first line that starts with "@" between the offset and the seed which will be the start of
+							#a new read and store its position
+							newblock = peek_buffer[:seed].rfind(b"\n@") + 1
+							
+							#If there was no line starting with "@" between the offset and the seed
+							if newblock == 0:
+								print("@ not found in peek data. Moving offset to seed point")
+								#Set the offset one character after the seed position to start the seed search again
+								print("Updating offset")
+								offset += seed
+								print("Updating rawvalue")
+								content.write(peek_buffer[:seed])
+								print("Updating peek_buffer")
+								peek_buffer = peek_buffer[seed:]
+								print("Searching the + line")
+								seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
+								print(len(peek_buffer))
+								
+							#If there was a line starting with "@" between the offset and the seed
+							else:
+								print("@ found at: ", newblock)
+								#Exclude the newline character from the newblock position. At the moment, newblock contains the
+								#newline character used in the search, which doesn't correspond to the beginning of the new read
+								#and needs to be excluded in the new v_block.
+								print("Updating offset")
+								offset += newblock
+								print("Updating rawvalue")
+								content.write(peek_buffer[:newblock])
+								print("Updating peek_buffer")
+								peek_buffer = peek_buffer[newblock:]
+								
+								print("transfering the results: ", (offset_0,offset))
+								chunks.append((offset_0,offset))
+								print("Loading new offsets")
+								offset_0 = offset
+								offset = offset_0 + buffersize
+								break
+									
+						#print("inner wall exit")
+			#sprint("100%")
 	return
 			
 if __name__ == '__main__':
@@ -733,9 +773,10 @@ if __name__ == '__main__':
 	previous_filenames = set()
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
+		'''
+		t0=time.time()
 		sprint("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
-			t0=time.time()
 			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
@@ -769,129 +810,122 @@ if __name__ == '__main__':
 				del multiple_results
 			
 			sprint("Decompressing file")
-			t0=time.time()
 			gzfile.seek(0)
 			with gzip.open(gzfile, 'rb') as f_in:
 				with io.BytesIO() as f_out:
 					shutil.copyfileobj(f_in, f_out)
 					loadedFASTQ.value = f_out.getvalue()
 			sprint("File decompressed in ", time.time()-t0)
+		'''
+		t0=time.time()	
+		chunks = decompressChunks(filepath, loadedFASTQ)
+		sprint(time.time()-t0)
+		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
+		#We pass the array to store the reads counted with an initialiser function so the different
+		#processes get it by inheritance and not as an argument
+		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(loadedFASTQ, readsCounter, readsCounterLock, q_data, q_error)) as pool:
+			#Initialise the list that will contain the results of all the processes
+			multiple_results=[]
 			
-			t = time.time()
-			with gzip.open(filepath, 'rb') as f_in:
-				with io.BytesIO() as f_out:
-					print(shutil.copyfileobj(f_in, f_out))
-					loadedFASTQ.value = f_out.getvalue()
-			print(time.time()-t)
+			sprint (time.strftime("%c"))
 			
-			#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
-			#We pass the array to store the reads counted with an initialiser function so the different
-			#processes get it by inheritance and not as an argument
-			with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(loadedFASTQ, readsCounter, readsCounterLock, q_data, q_error)) as pool:
-				#Initialise the list that will contain the results of all the processes
-				multiple_results=[]
-				
-				sprint (time.strftime("%c"))
-				
-				#updater.start()
-				
-				sprint("RAM: ", py.memory_info().rss)
-				for chunk in decompressChunks(loadedFASTQ):
-					#sprint("Sending job ", len(multiple_results)+1)
-					#Send a new process for the chunk
-					sprint(chunk)
-					#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
-					#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
-					multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
-					if counterActive.value == False:
-						counterActive.value = True
-				sprint(len(multiple_results), " jobs succesfully sent")
-				#print("Closing pool")
-				pool.close()
-				
-				gzfile.close()
+			updater.start()
+			
+			sprint("RAM: ", py.memory_info().rss)
+			for chunk in chunks:
+				#sprint("Sending job ", len(multiple_results)+1)
+				#Send a new process for the chunk
+				sprint(chunk)
+				#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
+				#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
+				multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
+				if counterActive.value == False:
+					counterActive.value = True
+			sprint(len(multiple_results), " jobs succesfully sent")
+			#print("Closing pool")
+			pool.close()
 
-				sprint("Waiting for results to be ready")
+			sprint("Waiting for results to be ready")
+			
+			pFinished = [0]*len(multiple_results)
+			sprint(sum(pFinished), "/", len(pFinished), end="\r")
+			
+			while True:
+				for index, res in enumerate(multiple_results):
+					if((res.ready()==True) and (pFinished[index] == 0)):
+						pFinished[index] = int(res.ready())
+						print(res.get())
+						sprint(sum(pFinished), "/", len(pFinished), end="\r")
+				if sum(pFinished) == len(multiple_results):
+					sprint(sum(pFinished), "/", len(pFinished), " DONE")
+					#sprint("Joining pool")
+					pool.join()
+					break
+				else:
+					time.sleep(1)
+			
+			#sprint(readsCounter[:])
+			del multiple_results
+			
+			updater.stop()
+			
+			counterActive.value = False
+			
+			sprint("Updating the shared dictionaries")
+			sprint("Length: ", updater.length())
+			sprint("Updating valid data")
+			s_data.update(updater.getData())
+			sprint("Updating errors")
+			for Ename, Ereads in updater.getErrors():
+				#If Ename in s_data then it cannot be in s_error.
 				
-				pFinished = [0]*len(multiple_results)
-				sprint(sum(pFinished), "/", len(pFinished), end="\r")
-				
-				while True:
-					for index, res in enumerate(multiple_results):
-						if((res.ready()==True) and (pFinished[index] == 0)):
-							pFinished[index] = int(res.ready())
-							#print(res.get())
-							sprint(sum(pFinished), "/", len(pFinished), end="\r")
-					if sum(pFinished) == len(multiple_results):
-						sprint(sum(pFinished), "/", len(pFinished), " DONE")
-						#sprint("Joining pool")
-						pool.join()
-						break
-					else:
-						time.sleep(1)
-				
-				#sprint(readsCounter[:])
-				del multiple_results
-				
-				updater.stop()
-				
-				counterActive.value = False
-				
-				sprint("Updating the shared dictionaries")
-				sprint("Length: ", updater.length())
-				sprint("Updating valid data")
-				s_data.update(updater.getData())
-				sprint("Updating errors")
-				for Ename, Ereads in updater.getErrors():
-					#If Ename in s_data then it cannot be in s_error.
+				if Ename in s_data:
+					#Transfer the read to s_error
+					s_error.setdefault(Ename,dict()).setdefault(s_data[Ename],set()).update(previous_filenames)
+					s_data.pop(Ename)
 					
-					if Ename in s_data:
-						#Transfer the read to s_error
-						s_error.setdefault(Ename,dict()).setdefault(s_data[Ename],set()).update(previous_filenames)
-						s_data.pop(Ename)
-						
-						#The Eread(s) in updater.getErrors() needs to be added to s_error too.
-						for Eread in Ereads:
+					#The Eread(s) in updater.getErrors() needs to be added to s_error too.
+					for Eread in Ereads:
+						s_error[Ename].setdefault(Eread, set()).add(filename)
+					
+					#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
+					readsCounter[(cpus*5) + 3] += 1
+					
+					#Substract the read from added as we transfered it to error
+					readsCounter[(cpus*5)] -= 1
+				
+				elif Ename in s_error:
+					#If Ename in s_error we need to check if the read already existed
+					for Eread in Ereads:
+						deduped = None
+						for s_Eread in s_error[Ename].keys():
+							deduped = dedupe(Eread[0], Eread[1], s_Eread)
+							if deduped:
+								#If Eread is either identical or contained in s_Eread
+								if(deduped[0] == 1):
+									s_error[Ename][s_Eread].add(filename)
+								#If Eread and s_Eread have been extended.
+								elif(deduped[0] == 2):
+									#Add the deduped read to the s_error with all the filenames from the s_Eread
+									s_error[Ename].setdefault(deduped[1], set()).update(s_error[Ename][s_Eread])
+									#Erased s_Eread as it has been superceeded by the deduped one
+									s_error[Ename].pop(s_Eread)
+									#Add the filename for Eread to s_error
+									s_error[Ename][deduped[1]].add(filename)
+								else:
+									print("Error!!")
+									exit()
+								break
+						if deduped == None:
+							#Eread is totally new for Ename, add it
 							s_error[Ename].setdefault(Eread, set()).add(filename)
-						
-						#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
-						readsCounter[(cpus*5) + 3] += 1
-						
-						#Substract the read from added as we transfered it to error
-						readsCounter[(cpus*5)] -= 1
-					
-					elif Ename in s_error:
-						#If Ename in s_error we need to check if the read already existed
-						for Eread in Ereads:
-							deduped = None
-							for s_Eread in s_error[Ename].keys():
-								deduped = dedupe(Eread[0], Eread[1], s_Eread)
-								if deduped:
-									#If Eread is either identical or contained in s_Eread
-									if(deduped[0] == 1):
-										s_error[Ename][s_Eread].add(filename)
-									#If Eread and s_Eread have been extended.
-									elif(deduped[0] == 2):
-										#Add the deduped read to the s_error with all the filenames from the s_Eread
-										s_error[Ename].setdefault(deduped[1], set()).update(s_error[Ename][s_Eread])
-										#Erased s_Eread as it has been superceeded by the deduped one
-										s_error[Ename].pop(s_Eread)
-										#Add the filename for Eread to s_error
-										s_error[Ename][deduped[1]].add(filename)
-									else:
-										print("Error!!")
-										exit()
-									break
-							if deduped == None:
-								#Eread is totally new for Ename, add it
-								s_error[Ename].setdefault(Eread, set()).add(filename)
-					else:
-						#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
-						#Add a totally new entry to s_error
-						for Eread in Ereads:
-							s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
-				sprint("Shared dictionaries updated")
-				gc.collect()
+				else:
+					#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
+					#Add a totally new entry to s_error
+					for Eread in Ereads:
+						s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
+			sprint("Shared dictionaries updated")
+			gc.collect()
 		sprint("File processed succesfully")
 		previous_filenames.add(filename)
 	
