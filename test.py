@@ -18,9 +18,7 @@ import inspect
 
 print (time.strftime("%c"))
 
-mypid=os.getpid()
-
-py = psutil.Process(mypid)
+py = psutil.Process(os.getpid())
 
 parser = argparse.ArgumentParser(description='Dedupe.')
 parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
@@ -31,15 +29,17 @@ cpus = args.threads
 filenames = args.filenames
 
 
-shared_arr = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+1)*4)
-arr_index = 0
+readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+1)*4)
+readsLoaded = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+1))
 
 manager = multiprocessing.Manager()
-data_manager = manager.dict()
-error_manager = manager.dict()
+s_data = manager.dict()
+s_dataNames = set()
+s_error = manager.dict()
+s_errorNames = set()
 
 lock_manager = manager.Lock()
-locked = multiprocessing.RawValue(ctypes.c_bool, False)
+#locked = multiprocessing.RawValue(ctypes.c_bool, False)
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -175,23 +175,26 @@ def dedupe(seq, qual, stored_read):
 			return (2,consensus)
 
 
-def processReads(byteString, s_data, s_error, shared_arr_index = -1):
-	private_counter = [0,0,0,0]
-
-	#Counter contains an array("added", "identical", "extended", "error")
-	if(shared_arr_index == -1):
-		print("Counter not initialised. Exiting")
-		exit()
-
-	p_error={}
-	p_data={}
-	
+def processReads(byteString, readsCounter_index = None):
 	'''
 	It adds the reads in byteString to the shared dictionary data
 	if they are correct/extended/overlapped or to the error
 	dictionary if they were not properly processed.
 	Returns true if it finished succesfully or exits otherwise
 	'''
+	global s_dataNames
+	global s_errorNames
+	
+	p_error={}
+	p_data={}
+	
+	private_counter = [0,0,0,0]
+
+	#Counter contains an array("added", "identical", "extended", "error")
+	if readsCounter_index == None:
+		print("Counter not initialised. Exiting")
+		exit()
+	
 	#Load the byteString into a byteStream to loop over it
 	with io.BytesIO(byteString) as file:
 
@@ -200,17 +203,12 @@ def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 		
 		#Execute until we reach the EOF
 		while file.tell() < len(byteString): 
-			#Wait if a lock is acquired which means shared data and shared error are being updated
-			while locked.value == True:
-				time.sleep(0.1)
-				#pass
-			
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
-				shared_arr[shared_arr_index] += private_counter[0]
-				shared_arr[shared_arr_index + 1] += private_counter[1]
-				shared_arr[shared_arr_index + 2] += private_counter[2]
-				shared_arr[shared_arr_index + 3] += private_counter[3]
+				readsCounter[readsCounter_index] += private_counter[0]
+				readsCounter[readsCounter_index + 1] += private_counter[1]
+				readsCounter[readsCounter_index + 2] += private_counter[2]
+				readsCounter[readsCounter_index + 3] += private_counter[3]
 				private_counter = [0,0,0,0]
 
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
@@ -226,23 +224,19 @@ def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 				assert name==seq==qual==b'', "Error: read not loaded correctly\nName: "+name.decode("UTF-8")+"\nRead: "+seq.decode("UTF-8")+"\n Qual: "+qual.decode("UTF-8")
 				#print(os.getpid(),": EOF reached with newlines at the end of the file")
 				break
-				'''
-				if name==seq==qual==b'':
-					print(os.getpid(),": EOF reached with newlines at the end of the file")
-				else:
-					print("Error: read not loaded correctly")
-					exit()
-				'''
+			
 			#Check if the read name is in the error dictionary.
 			#If the read name is in the error dict means previous conflict with the
 			#read, so add the new read there and do not process.
 			if name in p_error:
 				p_error[name].append((seq,qual))
 				private_counter[3] += 1 #error
-			elif name in s_error:
+			elif name in s_errorNames:
 				#print(name.decode("UTF-8"),": error",)
 				#OBS! We do not copy s_error therefore error MUST BE APPEND to s_error in the merge
-				p_error[name]=[(seq,qual)]
+				p_error[name]=s_error[name]
+				p_error[name].append((seq,qual))
+				
 				private_counter[3] += 1 #error
 			'''
 			#Check if SEQ and QUAL have different lengths
@@ -268,55 +262,58 @@ def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 					exit()
 				'''
 				#Try to get the read. If not it returns None
-				s_read = s_data.get(name, None)
+				#s_read = s_data.get(name, None) <--- We are replacing this with the dataNames to accelerate the reading
 				p_read = p_data.get(name, None)
 
-				#Check if the read name is not in the data dictionary.
-				if p_read == None:
-					if s_read == None:
-						#print(name.decode("UTF-8"),": adding new read",)
-						p_data[name]=(seq,qual)
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-						private_counter[0] += 1 #added
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-					else:
-						#print("DEDUPE shared")
-						deduped = dedupe(seq, qual, s_read)
-						if deduped:
-							#Only store the read if it has been extended. In this case, the shared item will be erased.
-							#If identical, leave the shared copy and add nothing to p_data.
-							if(deduped[0] == 2):
-								p_data[name]=deduped[1]
-								try:
-									s_data.pop(name)
-								except Exception:
-									print(name, "Has already been erased by another process. Continue")
-									pass
-							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-							private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-						else:
-							p_error[name]=[(seq,qual), s_read]
-							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-							private_counter[3] += 1 #error
-							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-							#pass
-				else:
+				#Check if the read name is in p_data dictionary.
+				if p_read:
 					#print("DEDUPE private")
 					deduped = dedupe(seq, qual, p_read)
 					if deduped:
 						#Only rewrite the read if it has been extended. If identical, do nothing.
 						if(deduped[0] == 2):
 							p_data[name]=deduped[1]
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 					else:
 						#TODO this should be added to the existing list
 						p_error[name]=[(seq,qual), p_read]
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
+						p_data.pop(name)
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						private_counter[3] += 1 #error
-						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+				else:
+				#If not in p_data, check if it's in s_data.
+					if name in s_dataNames:
+						#print("DEDUPE shared")
+						deduped = dedupe(seq, qual, s_data[name])
+						if deduped:
+							#Only store the read if it has been extended. In this case, the shared item will be erased.
+							#If identical, leave the shared copy and add nothing to p_data.
+							if(deduped[0] == 2):
+								p_data[name]=deduped[1]
+								'''try:
+									s_data.pop(name)
+								except Exception:
+									print(name, "Has already been erased by another process. Continue")
+									pass'''
+							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+							private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+						else:
+							p_error[name]=[(seq,qual), s_data[name]]
+							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+							private_counter[3] += 1 #error
+							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+							#pass
+					else:
+					#If not in p_data or s_data, it is a new read.
+						#print(name.decode("UTF-8"),": adding new read",)
+						p_data[name]=(seq,qual)
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
+						private_counter[0] += 1 #added
+						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						
 			#print("leaving if (len(seq) == len(qual))")
 		#When while reaches EOF
@@ -328,8 +325,11 @@ def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 	#Ideally no duplicate items must be found and the saving process should be smooth.
 	#In the case there were ducplicates in the source file which ended up in different processes
 	#We will dedupe them and add a single entry into s_data
+	#print("\n", os.getpid(), " - All reads processed. Waiting signal to add them to the shared dictionary")
+	readsLoaded[int(readsCounter_index/4)] = 1
+	print(readsLoaded[:])
 	with lock_manager: #Keep other processes from saving to s_data
-		locked.value = True #Make other processes wait before continuing reading s_data
+		#print("lock acquired")
 		#TODO: The saving code goes in here
 		#1. Create intersection between shared and private
 		duplicate_names = s_data.keys() & p_data.keys()
@@ -343,40 +343,66 @@ def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 				private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 			else:
 				#TODO this should be added to the existing list
-				p_error[name]=[(seq,qual), p_read]
+				p_error[name]=[p_data[name], s_data[name]]
 				private_counter[3] += 1 #error
 			private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+		
+		duplicate_Enames = s_data.keys() & p_error.keys()
+		for Ename in duplicate_Enames:
+			s_data.pop(name)
+			
 		#3. Update the shared with the private data and update the counter
 		s_data.update(p_data)
-		shared_arr[shared_arr_index] += private_counter[0]
-		shared_arr[shared_arr_index + 1] += private_counter[1]
-		shared_arr[shared_arr_index + 2] += private_counter[2]
-		shared_arr[shared_arr_index + 3] += private_counter[3]
+		s_error.update(p_error)
 		p_data.clear()
-		locked.value = False
+		p_error.clear()
+		
+		readsCounter[readsCounter_index] += private_counter[0]
+		readsCounter[readsCounter_index + 1] += private_counter[1]
+		readsCounter[readsCounter_index + 2] += private_counter[2]
+		readsCounter[readsCounter_index + 3] += private_counter[3]
+		
 	return True
 
-def init_process(shared_arr_, locked_):
-	global shared_arr, locked
-	shared_arr = shared_arr_ # must be inherited, not passed as an argument
-	locked = locked_
+def init_processReads(s_data_, s_error_, lock_manager_, readsCounter_, readsLoaded_):
+	global readsCounter, s_data, s_error, readsLoaded, lock_manager
+	readsCounter = readsCounter_ # must be inherited, not passed as an argument
+	s_error = s_error_
+	s_data = s_data_
+	readsLoaded = readsLoaded_
+	lock_manager = lock_manager_
 
 def gzip_nochunks_byte_u3():
-	global arr_index
-	global shared_arr
+	global readsCounter
+	global readsLoaded
+	global lock_manager
+	global s_data
+	global s_error
+	global s_dataNames
+	global s_errorNames
 	
-	#print(shared_arr[:])
+	#print(readsCounter[:])
 	#print(arr_index)
 	start_time = time.time()
 	for filename in filenames:
-		print("Loading",filename," in RAM using ",cpus," processes")
+		print("Clear datanames")
+		s_dataNames.clear()
+		print("clear errornames")
+		s_errorNames.clear()
+		print("Loading datanames")
+		s_dataNames = set(s_data.keys())
+		print("Loading errornames")
+		s_errorNames = set(s_error.keys())
+		
+		print("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
-			with multiprocessing.Pool(cpus) as pool:
+			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
-					#print("sending job: ", i)
+					print("sending job: ", i, end="\r")
 					multiple_results.append(pool.apply_async(getChunk,args=(filename,i,cpus)))
 					#pool.apply_async(getChunk,args=(filename,my_shared_list,i,cpus))
+				print("")
 				#print("Closing pool")
 				pool.close()
 				while True:
@@ -404,45 +430,55 @@ def gzip_nochunks_byte_u3():
 				print("Estimating compression ratio:",round(c_ratio,2))
 				print("Approx. decompressed file: ", round(c_size/c_ratio))
 				print("Decompressing and processing")
-				i=1
-				arr_index=0
+				
 				buffersize=int((c_size/c_ratio)/(cpus))
 				v_block=None
+				
+				
+				
 				print("Chunk size: ",buffersize)
 				print (time.strftime("%c"))
-				with multiprocessing.Pool(processes=cpus, initializer=init_process, initargs=(shared_arr,locked,)) as pool:
+				with multiprocessing.Pool(processes=(cpus+1), initializer=init_processReads, initargs=(s_data, s_error, lock_manager, readsCounter, readsLoaded)) as pool:
 					multiple_results=[]
+					arr_index=0
+					print(readsLoaded)
+					print(readsLoaded[:])
+					for i in range(len(readsLoaded)):
+						readsLoaded[i] = 0
+					print(readsLoaded)
+					print(readsLoaded[:])
+					lock_manager.acquire()
 					
 					while True:
 						chunk = file.read(buffersize)
 						if chunk == None:
-							print(i, " - EOF - flushing")
+							print(int((arr_index/4)+1), " - EOF - flushing")
 							print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 							print("Error?")
 							break
 						elif len(chunk) < buffersize:
 							if v_block == None:
-								print(i," - File read in one chunk")
+								print(int((arr_index/4)+1)," - File read in one chunk")
 								v_block = chunk
-								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", i, end="\r")
+								print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 								#processReads(v_block, data_manager, error_manager, lock_manager)
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, arr_index)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
 								arr_index += 4
 								break
 							else:
-								#print(i," - Last chunk")
+								#print(int((arr_index/4)+1)," - Last chunk")
 								v_block += chunk
-								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", i, end="\r")
+								print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 								
 								#processReads(v_block, data_manager, error_manager, lock_manager)
 								#multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, counters[-1])))
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, arr_index)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
 								arr_index += 4
 								break
 						elif file.tell() == buffersize:
-							#print(i," - Very beginning of the file")
+							#print(int((arr_index/4)+1)," - Very beginning of the file")
 							v_block = chunk
 						else:
 							x0=0
@@ -463,44 +499,61 @@ def gzip_nochunks_byte_u3():
 										#print("first \\n@ before \\n+:  ",chunk.rfind(b"\n@",x0,x))
 										newblock = chunk.rfind(b"\n@",x0,x)+1
 										v_block += chunk[:newblock]
-										print(round(100*i/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", i, end="\r")
+										print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 										
 										#processReads(v_block, data_manager, error_manager, counters[-1])
-										multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, arr_index)))
+										multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
 										arr_index += 4
 										v_block = chunk[newblock:]
-										i+=1
 										break
 							#print("inner wall exit")
 					print(100,"%",end="\r\n")
 					print("Closing pool")
 					pool.close()
 					print("Waiting for results to be ready")
-					
 					while True:
+						reads_total = sum(readsCounter[:])
+						if(cpus > 1):
+							reads_added = sum(operator.itemgetter(*range(0,len(readsCounter),4))(readsCounter))
+							reads_identical = sum(operator.itemgetter(*range(1,len(readsCounter),4))(readsCounter))
+							reads_extended = sum(operator.itemgetter(*range(2,len(readsCounter),4))(readsCounter))
+							reads_error = sum(operator.itemgetter(*range(3,len(readsCounter),4))(readsCounter))
+						else:
+							reads_added = readsCounter[0]
+							reads_identical = readsCounter[1]
+							reads_extended = readsCounter[2]
+							reads_error = readsCounter[3]
+						
+						print("0/",len(multiple_results),"Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round(reads_total/(time.time()-start_time)), " reads/s              ", end="\r")
+						if(sum(readsLoaded) == len(multiple_results)):
+							break
 						time.sleep(1)
+
+					lock_manager.release()
+					while True:
 						pFinished=0
 						for res in multiple_results:
 							pFinished += res.ready()
-						reads_total = sum(shared_arr[:])
+						reads_total = sum(readsCounter[:])
 						if(cpus > 1):
-							reads_added = sum(operator.itemgetter(*range(0,len(shared_arr),4))(shared_arr))
-							reads_identical = sum(operator.itemgetter(*range(1,len(shared_arr),4))(shared_arr))
-							reads_extended = sum(operator.itemgetter(*range(2,len(shared_arr),4))(shared_arr))
-							reads_error = sum(operator.itemgetter(*range(3,len(shared_arr),4))(shared_arr))
+							reads_added = sum(operator.itemgetter(*range(0,len(readsCounter),4))(readsCounter))
+							reads_identical = sum(operator.itemgetter(*range(1,len(readsCounter),4))(readsCounter))
+							reads_extended = sum(operator.itemgetter(*range(2,len(readsCounter),4))(readsCounter))
+							reads_error = sum(operator.itemgetter(*range(3,len(readsCounter),4))(readsCounter))
 						else:
-							reads_added = shared_arr[0]
-							reads_identical = shared_arr[1]
-							reads_extended = shared_arr[2]
-							reads_error = shared_arr[3]
+							reads_added = readsCounter[0]
+							reads_identical = readsCounter[1]
+							reads_extended = readsCounter[2]
+							reads_error = readsCounter[3]
 						
 						print(pFinished,"/",len(multiple_results),"Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round(reads_total/(time.time()-start_time)), " reads/s              ", end="\r")
 						if pFinished == len(multiple_results):
 							print(pFinished,"/",len(multiple_results),"Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "                                                                             ")
 							print("DONE")
-							print(shared_arr[:])
+							print(readsCounter[:])
 							break
+						time.sleep(1)
 					print("Joining pool")
 					pool.join()
 					print("outer wall exit")
