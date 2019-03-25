@@ -113,10 +113,14 @@ def gzCompress(slice_i, slice_f):
 	global s_data
 	with io.BytesIO() as gzfileStream:
 		with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-			for index, item in enumerate(s_data.items()):
-				if index >= slice_i and index < slice_f:
-					gzfile.write(item[0]+b"\n"+item[1][0]+b"\n+\n"+item[1][1]+b"\n")
+			for index in range(slice_i, slice_f):
+				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
+			gzfile.close()
 		return gzfileStream.getvalue()
+
+def init_gzCompress(s_data_keys_):
+	global s_data_keys
+	s_data_keys = s_data_keys_
 
 
 def best_overlap(read1,qual1,read2,qual2):
@@ -276,20 +280,6 @@ def processReads(chunk):
 					readsCounter[counter] = 1
 					procID = counter
 					break
-	'''
-	with FASTQ_chunks.get_lock():
-		sprint("Loading chunk")
-		for index in range(len(FASTQ_chunks)):
-			if(len(FASTQ_chunks[index]) > 0):
-				file = io.BytesIO(FASTQ_chunks[index])
-				FASTQ_chunks[index] = b''
-				break
-		if file == None:
-			sprint("No chunks left to process")
-			return True
-	'''
-
-	
 	p_error={}
 	p_data={}
 	
@@ -456,7 +446,6 @@ def processReads(chunk):
 	
 	del p_data
 	del p_error
-	gc.collect()
 	
 	with readsCounterLock:
 		readsCounter[procID] = 0
@@ -501,7 +490,7 @@ class updateShared:
 		#print("updateshared stop start")
 		sprint("Waiting for the queues to be empty")
 		while q_data.empty() == False:
-			#print(int(q_error.qsize() + q_data.qsize()))
+			sprint("Empty: ", q_data.empty(), " Size: ", q_error.qsize(), end="\r")
 			time.sleep(0.1)
 		#print("Queues empty")
 		#print("trying to stop")
@@ -531,8 +520,8 @@ class updateShared:
 		#print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
+			sprint("U_files left: ", q_data.qsize(), end="\r")
 			while q_data.empty() == False:
-				sprint("U_files left: ", q_data.qsize(), end="\r")
 				#name, read = q_data.get()
 				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
 				#p_data, p_error = pickle.loads(q_data.get())
@@ -578,7 +567,6 @@ class updateShared:
 					else:
 						#print(name, read)
 						self.u_data[name] = read
-			
 			#print("empty")
 			time.sleep(1)
 		
@@ -610,7 +598,6 @@ def decompressChunks(filepath):
 	v_block and start a new v_block
 
 	'''
-	content = io.BytesIO()
 	#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
 	#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 	#can always happen that we underestimate the size and a cpus+1 chunks are generated.
@@ -658,6 +645,8 @@ def decompressChunks(filepath):
 					if offset_0 == 0 and offset >= f_size:
 						chunks.append(peek_buffer + file.read())
 						content.close()
+						file.close()
+						gzfile.close()
 						sprint("File read in one chunk")
 						return chunks
 					else:
@@ -736,6 +725,8 @@ def decompressChunks(filepath):
 							content.write(file.read())
 							chunks.append(content.getvalue())
 							content.close()
+							file.close()
+							gzfile.close()
 							sprint("chunks: ", len(chunks))
 							return chunks
 	return
@@ -760,16 +751,17 @@ if __name__ == '__main__':
 	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
 	readsCounterLock = multiprocessing.Lock()
 	
-	counter = multiprocessing.Process(target=count, args=(cpus,messages))
 	counterActive = multiprocessing.RawValue(ctypes.c_bool, False)
+	counter = multiprocessing.Process(target=count, args=(cpus,messages))
+	counter.daemon=True
 	counter.start()
 	
 	updater = updateShared()
 	
-	FASTQ_chunks = multiprocessing.RawArray(ctypes.c_char_p, [b''])
+	FASTQ_chunks = None
 	
 	s_data = dict()
-	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, [b''])
+	s_data_keys = None
 	s_error = dict()
 	
 	q_data = multiprocessing.Queue()
@@ -781,15 +773,12 @@ if __name__ == '__main__':
 		filename = pathlib.Path(filepath).name
 		sprint("Processing file: ", filename)
 		FASTQ_chunks = multiprocessing.Array(ctypes.c_char_p, decompressChunks(filepath))
-
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
 		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(FASTQ_chunks, readsCounter, readsCounterLock, q_data)) as pool:
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
-			
-			updater.start()
 			
 			sprint("RAM: ", py.memory_info().rss)
 			for chunk in range(len(FASTQ_chunks)):
@@ -801,6 +790,7 @@ if __name__ == '__main__':
 				multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
 				if counterActive.value == False:
 					counterActive.value = True
+					updater.start()
 			sprint(len(multiple_results), " jobs succesfully sent")
 			#print("Closing pool")
 			pool.close()
@@ -826,76 +816,78 @@ if __name__ == '__main__':
 			
 			#sprint(readsCounter[:])
 			del multiple_results
+			FASTQ_chunks = None
+		
+		updater.stop()
+		counterActive.value = False
+		
+		sprint("Updating the shared dictionaries")
+		sprint("Length: ", updater.length())
+		sprint("Updating valid data")
+		s_data.update(updater.getData())
+		sprint("Updating errors")
+		for Ename, Ereads in updater.getErrors():
+			#If Ename in s_data then it cannot be in s_error.
 			
-			updater.stop()
-			
-			counterActive.value = False
-			
-			sprint("Updating the shared dictionaries")
-			sprint("Length: ", updater.length())
-			sprint("Updating valid data")
-			s_data.update(updater.getData())
-			sprint("Updating errors")
-			for Ename, Ereads in updater.getErrors():
-				#If Ename in s_data then it cannot be in s_error.
+			if Ename in s_data:
+				#Transfer the read to s_error
+				s_error.setdefault(Ename,dict()).setdefault(s_data[Ename],set()).update(previous_filenames)
+				s_data.pop(Ename)
 				
-				if Ename in s_data:
-					#Transfer the read to s_error
-					s_error.setdefault(Ename,dict()).setdefault(s_data[Ename],set()).update(previous_filenames)
-					s_data.pop(Ename)
-					
-					#The Eread(s) in updater.getErrors() needs to be added to s_error too.
-					for Eread in Ereads:
+				#The Eread(s) in updater.getErrors() needs to be added to s_error too.
+				for Eread in Ereads:
+					s_error[Ename].setdefault(Eread, set()).add(filename)
+				
+				#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
+				readsCounter[(cpus*5) + 3] += 1
+				
+				#Substract the read from added as we transfered it to error
+				readsCounter[(cpus*5)] -= 1
+			
+			elif Ename in s_error:
+				#If Ename in s_error we need to check if the read already existed
+				for Eread in Ereads:
+					deduped = None
+					for s_Eread in s_error[Ename].keys():
+						deduped = dedupe(Eread[0], Eread[1], s_Eread)
+						if deduped:
+							#If Eread is either identical or contained in s_Eread
+							if(deduped[0] == 1):
+								s_error[Ename][s_Eread].add(filename)
+							#If Eread and s_Eread have been extended.
+							elif(deduped[0] == 2):
+								#Add the deduped read to the s_error with all the filenames from the s_Eread
+								s_error[Ename].setdefault(deduped[1], set()).update(s_error[Ename][s_Eread])
+								#Erased s_Eread as it has been superceeded by the deduped one
+								s_error[Ename].pop(s_Eread)
+								#Add the filename for Eread to s_error
+								s_error[Ename][deduped[1]].add(filename)
+							else:
+								print("Error!!")
+								exit()
+							break
+					if deduped == None:
+						#Eread is totally new for Ename, add it
 						s_error[Ename].setdefault(Eread, set()).add(filename)
-					
-					#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
-					readsCounter[(cpus*5) + 3] += 1
-					
-					#Substract the read from added as we transfered it to error
-					readsCounter[(cpus*5)] -= 1
-				
-				elif Ename in s_error:
-					#If Ename in s_error we need to check if the read already existed
-					for Eread in Ereads:
-						deduped = None
-						for s_Eread in s_error[Ename].keys():
-							deduped = dedupe(Eread[0], Eread[1], s_Eread)
-							if deduped:
-								#If Eread is either identical or contained in s_Eread
-								if(deduped[0] == 1):
-									s_error[Ename][s_Eread].add(filename)
-								#If Eread and s_Eread have been extended.
-								elif(deduped[0] == 2):
-									#Add the deduped read to the s_error with all the filenames from the s_Eread
-									s_error[Ename].setdefault(deduped[1], set()).update(s_error[Ename][s_Eread])
-									#Erased s_Eread as it has been superceeded by the deduped one
-									s_error[Ename].pop(s_Eread)
-									#Add the filename for Eread to s_error
-									s_error[Ename][deduped[1]].add(filename)
-								else:
-									print("Error!!")
-									exit()
-								break
-						if deduped == None:
-							#Eread is totally new for Ename, add it
-							s_error[Ename].setdefault(Eread, set()).add(filename)
-				else:
-					#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
-					#Add a totally new entry to s_error
-					for Eread in Ereads:
-						s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
-			sprint("Shared dictionaries updated")
-			gc.collect()
+			else:
+				#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
+				#Add a totally new entry to s_error
+				for Eread in Ereads:
+					s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
+		sprint("Shared dictionaries updated")
 		sprint("File processed succesfully")
 		previous_filenames.add(filename)
 	
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
 	
-	with multiprocessing.Pool(cpus) as pool:
+	sprint("Exporting the keys")
+	
+	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, list(s_data.keys()))
+	
+	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
 		multiple_results = []
 		sprint("Compressing the results")
-		
 		for i in range(cpus):
 			multiple_results.append(pool.apply_async(gzCompress,args=((i*len(s_data))//cpus, ((i+1)*len(s_data))//cpus)))
 		
@@ -915,23 +907,24 @@ if __name__ == '__main__':
 						pFinished[index] = int(res.ready())
 						sprint(sum(pFinished), "/", len(pFinished), end="\r")
 				if sum(pFinished) == len(multiple_results):
-					sprint(sum(pFinished), "/", len(pFinished), " DONE")
 					pool.join()
+					sprint(sum(pFinished), "/", len(pFinished), " DONE")
 					break
 				else:
 					time.sleep(1)
 			fh.close()
-		s_data_keys = None
-		
-		#sprint(readsCounter[:])
+			#sprint(readsCounter[:])
 		del multiple_results
+	s_data_keys.clear()
+	s_data.clear()
+	del s_data_keys
+	del s_data
 	
-	sprint("Generating error files")
+	sprint("Generating error table")
 	output = pathlib.Path(args.output)
 	error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
 	if(os.path.isdir(error_dir) == False):
 		os.mkdir(error_dir)
-	error_files = dict()
 	
 	with open(error_dir + ".csv", 'w', newline='') as csvfile:
 		spamwriter = csv.writer(csvfile, delimiter=';',	quotechar='"', quoting=csv.QUOTE_MINIMAL)
@@ -945,7 +938,8 @@ if __name__ == '__main__':
 					else:
 						row.append(" ")
 				spamwriter.writerow(row)
-	
+	sprint("Generating error files")
+	error_files = dict()
 	for filename in previous_filenames:
 		error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
 	sprint(error_files)
@@ -953,22 +947,14 @@ if __name__ == '__main__':
 			for Eread, Efiles in Ereads.items():
 				for Efile in Efiles:
 					error_files[Efile].write(Ename+b"\n"+Eread[0]+b"\n+\n"+Eread[1]+b"\n")
-				
+	
+	del s_error	
+	
 	for filename in error_files:
 		error_files[filename].close()
 	
-	s_data.clear()
-	s_error.clear()
-	updater.stop()
-	counterActive.value = False
-	counter.terminate()
 	sprint (time.strftime("%c"))
 	sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
-	#print("Saving to disk")
-	#print(timeit.Timer(save1).timeit(number=1))
-	#print(timeit.Timer(save2).timeit(number=1))
-	#print(timeit.Timer(save3).timeit(number=1))
-	#data={}
-	#gc.collect()
+	gc.disable()
 
-	sprint (time.strftime("%c"))
+
