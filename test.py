@@ -17,6 +17,7 @@ import math
 import pickle
 import zlib
 import sys
+import pathlib
 
 #from multiprocessing.process import current_process
 #current_process()._config["tempdir"] = "/dev/shm"
@@ -27,12 +28,12 @@ py = psutil.Process(os.getpid())
 
 parser = argparse.ArgumentParser(description='Dedupe.')
 parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
-parser.add_argument('--output','-o', type=str, help='threads to use')
-parser.add_argument('filenames', nargs='+', help='files to process')
+parser.add_argument('--output','-o', type=str, help='output filename')
+parser.add_argument('filepaths', nargs='+', help='files to process')
 
 args = parser.parse_args()
 cpus = args.threads
-filenames = args.filenames
+filepaths = args.filepaths
 
 readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
 readsCounterLock = multiprocessing.Lock()
@@ -292,12 +293,11 @@ def processReads(byteString):
 				p_error[name].append((seq,qual))
 				private_counter[3] += 1 #error
 			elif name in s_error:
-				#print(name.decode("UTF-8"),": error",)
-				#OBS! We do not copy s_error therefore error MUST BE APPEND to s_error in the merge
-				p_error[name] = s_error[name]
-				p_error[name].append((seq,qual))
-				
+				#We do not append the errors to s_error directly because we identify in which file they were found once the results are returned
+				#p_error[name] = s_error[name]
+				p_error[name] = [(seq,qual)]
 				private_counter[3] += 1 #error
+				
 			'''
 			#Check if SEQ and QUAL have different lengths
 			elif (len(seq) != len(qual)):
@@ -357,7 +357,10 @@ def processReads(byteString):
 							private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						else:
-							p_error[name]=[(seq,qual), s_read]
+							#We don't add the s_read to the p_error as we need to keep track from which file it came from
+							#s_read will be transfered after returning the data to main process
+							#p_error[name]=[(seq,qual), s_read]
+							p_error[name]=[(seq,qual)]
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							private_counter[3] += 1 #error
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
@@ -409,15 +412,17 @@ def gzip_nochunks_byte_u3():
 	global s_error #Global shared dictionary containing the error reads
 	global messages
 	
-	for filename in filenames:
+	previous_filename = ""
+	for filepath in filepaths:
+		filename = pathlib.Path(filepath).name
 		print("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
 			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
 					print("sending job: ", i, end="\r")
-					multiple_results.append(pool.apply_async(getChunk,args=(filename,i,cpus)))
-					#pool.apply_async(getChunk,args=(filename,my_shared_list,i,cpus))
+					multiple_results.append(pool.apply_async(getChunk,args=(filepath,i,cpus)))
+					#pool.apply_async(getChunk,args=(filepath,my_shared_list,i,cpus))
 				print("")
 				#print("Closing pool")
 				pool.close()
@@ -649,21 +654,24 @@ def gzip_nochunks_byte_u3():
 									else:
 										#TODO this should be added to the existing list
 										p_error[name]=[p_data[name], u_data[name]]
+										p_data.pop(name)
+										u_data.pop(name)
 										readsCounter[(cpus*5) + 3] += 1 #error
 										#private_counter[3] += 1 #error
 									readsCounter[(cpus*5)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
 									#private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
 								
-								duplicate_Enames = u_data.keys() & p_error.keys()
+								duplicate_Enames = u_error.keys() & p_error.keys()
 								for Ename in duplicate_Enames:
-									u_data.pop(name)
+									u_error[Ename].extend(p_error[Ename])
+									p_error.pop(Ename)
 									
-								#3. Update the shared with the private data and update the counter
+								#3. Update the file data with the private data
 								sprint("Updating the file dictionary")
 								u_data.update(p_data)
 								u_error.update(p_error)
-								p_data.clear()
-								p_error.clear()
+								del p_data
+								del p_error
 								sprint(index, "Ready")
 							
 								pFinished[index] = int(res.ready())
@@ -681,12 +689,30 @@ def gzip_nochunks_byte_u3():
 					print("")
 					print(len(u_data))
 					s_data.update(u_data)
-					s_error.update(u_error)
-					p_data.clear()
-					p_error.clear()
-					multiple_results = []
+					
+					for Ename in u_error:
+						#1. Check whether the entry exists already in the dictioniary
+						#2. If it doesn't exist define a dictionary for it
+						if Ename not in s_error:
+							s_error[Ename] = dict()
+						if Ename in s_data:
+							if previous_filename not in s_error[Ename]:
+								s_error[Ename][previous_filename] = list()
+							s_error[Ename][previous_filename].append(s_data[Ename])
+							s_data.pop(Ename)
+						if filename not in s_error[Ename]:
+							s_error[Ename][filename] = list()
+						s_error[Ename][filename].extend(u_error[Ename])
+						#u_error.pop(Ename)
+						
+					#3. Check whether there's an entry for the filename
+					#4. If it doesn't exist create the entry and define an empty list on it
+					del u_data
+					del u_error
+					del multiple_results
 				gc.collect()
 		print("LOADED")
+		previous_filename = filename
 	#Write the output to disk
 	print("S_data: ", len(s_data))
 	with multiprocessing.Pool(cpus) as pool:
@@ -699,7 +725,7 @@ def gzip_nochunks_byte_u3():
 			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
 			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
 			tot += len(slice)
-			#slice.clear()
+			del slice
 		print(tot)
 		print("Closing pool")
 		pool.close()
@@ -710,7 +736,18 @@ def gzip_nochunks_byte_u3():
 				#print(gzip.decompress(res.get()))
 				fh.write(res.get())
 			fh.close()
-		s_data_keys.clear()
+		del s_data_keys
+		
+		output = pathlib.Path(args.output)
+		error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
+		if(os.path.isdir(error_dir) == False):
+			os.mkdir(error_dir)
+		for name in s_error:
+			for filename in s_error[name]:
+				with gzip.open(error_dir + "/" + filename, 'a+b') as f:
+					for read in s_error[name][filename]:
+						f.write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
+	
 	print (time.strftime("%c"))
 	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
