@@ -129,9 +129,9 @@ def gzCompress(slice_i, slice_f):
 			for index in range(slice_i, slice_f):
 				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
 			gzfile.close()
-		sprint("Releasing memory: gzCompress")
+		sprint("Releasing memory: gzCompress", end="\r")
 		gc.collect()
-		sprint("Done: gzCompress")
+		sprint("Done: gzCompress", end="\r")
 		return gzfileStream.getvalue()
 
 def init_gzCompress(s_data_keys_):
@@ -298,9 +298,9 @@ def processReads(chunk, minoverlap=25):
 		#Erase the chunk to release mempory
 		chunk_length = len(FASTQ_chunks[chunk])
 		FASTQ_chunks[chunk] = b''
-		sprint("Releasing memory: ProcessReads")
+		sprint("Releasing memory: ProcessReads", end="\r")
 		gc.collect()
-		sprint("Done: ProcessReads")
+		sprint("Done: ProcessReads", end="\r")
 		#Make sure we are at the beginning of the stream.
 		file.seek(0)
 		
@@ -384,7 +384,7 @@ def processReads(chunk, minoverlap=25):
 						p_data.pop(name)
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 						#sprint("Added error in dedupe private")
-						print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
+						#print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
 						private_counter[3] += 2 #error
 						private_counter[0] -= 1 #error
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
@@ -409,7 +409,7 @@ def processReads(chunk, minoverlap=25):
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							private_counter[3] += 1 #error
 							#sprint("Added error in dedupe shared")
-							print("\n>", name.decode("UTF-8"), "\n", s_read[0].decode("UTF-8"), "\n>", name.decode("UTF-8"), "\n", seq.decode("UTF-8"), file=sys.stderr)
+							#print("\n>", name.decode("UTF-8"), "\n", s_read[0].decode("UTF-8"), "\n>", name.decode("UTF-8"), "\n", seq.decode("UTF-8"), file=sys.stderr)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							#pass
 					else:
@@ -451,9 +451,9 @@ def processReads(chunk, minoverlap=25):
 	with readsCounterLock:
 		readsCounter[procID] = 0
 	
-	sprint("Releasing memory: Processreads")
+	sprint("Releasing memory: Processreads", end="\r")
 	gc.collect()
-	sprint("Done: Processreads")
+	sprint("Done: Processreads", end="\r")
 	#print(procID, " Finished")
 	
 	return True
@@ -500,9 +500,9 @@ class updateShared:
 		#print("trying to stop")
 		self._running = False
 		self._updater.join()
-		sprint("Releasing memory: Updater")
+		sprint("Releasing memory: Updater", end="\r")
 		gc.collect()
-		sprint("Done: Updater")
+		sprint("Done: Updater", end="\r")
 		sprint("Updater stopped")
 
 	def getData(self):
@@ -575,16 +575,16 @@ class updateShared:
 							self.u_data.pop(name)
 							readsCounter[(cpus*5) + 3] += 2 #error
 							#sprint("Added error in self.u_data:")
-							for read in self.u_error[name]:
-								print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
+							#for read in self.u_error[name]:
+							#	print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
 						readsCounter[(cpus*5)] -= 1 #or is 2? #Substract the read from added as it has been added to either identical, extended or error
 					else:
 						#print(name, read)
 						self.u_data[name] = read
 				#print("empty")
-				sprint("Releasing memory: Updater")
+				sprint("Releasing memory: Updater", end="\r")
 				gc.collect()
-				sprint("Done: Updater")
+				sprint("Done: Updater", end="\r")
 				sprint("U_files left: ", q_data.qsize(), end="\r")
 			sprint("U_files left: ", q_data.qsize(), end="\r")
 			time.sleep(1)
@@ -592,7 +592,7 @@ class updateShared:
 		return
 
 
-def decompressChunks(filepath):
+def decompressChunks(filepath, buffersize):
 	'''
 	This function works around the structure of a FASTQ read to know whether it is inside a read or not.
 	A fastq read is structured in blocks of 4 lines as follows:
@@ -643,9 +643,7 @@ def decompressChunks(filepath):
 			sprint("Estimated compression ratio:", round(gz_ratio, 2))
 			sprint("Approx. decompressed file size: ", humanbytes(f_size))
 			
-			if (f_size/cpus) > 3*1024*1024*1024:
-				buffersize = 3*1024*1204*1024
-			else:
+			if (f_size/cpus) < buffersize:
 				buffersize = math.ceil(f_size/cpus)
 				
 			sprint("Using chunk size of: ", humanbytes(buffersize))
@@ -665,9 +663,9 @@ def decompressChunks(filepath):
 						content.close()
 						file.close()
 						gzfile.close()
-						sprint("Releasing memory: DecompressChunks")
+						sprint("Releasing memory: DecompressChunks", end="\r")
 						gc.collect()
-						sprint("Done: DecompressChunks")
+						sprint("Done: DecompressChunks", end="\r")
 						sprint("File read in one chunk")
 						return chunks
 					else:
@@ -749,9 +747,9 @@ def decompressChunks(filepath):
 							content.close()
 							file.close()
 							gzfile.close()
-							sprint("Releasing memory: DecompressChunks")
+							sprint("Releasing memory: DecompressChunks", end="\r")
 							gc.collect()
-							sprint("Done: DecompressChunks")
+							sprint("Done: DecompressChunks", end="\r")
 							sprint("chunks: ", len(chunks))
 							return chunks
 	return
@@ -765,13 +763,16 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Dedupe.')
 	parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
 	parser.add_argument('--output','-o', type=str, help='output filename')
-	parser.add_argument('--minoverlap','-m', type=int, default=int(25), help='minimum overlap (default: 25)')
+	parser.add_argument('--minoverlap', type=int, default=int(25), help='minimum overlap (default: 25)')
+	parser.add_argument('--buffersize', type=int, default=int(1024*1024*1024), help='maximum buffer size in bytes')
 	parser.add_argument('filepaths', nargs='+', help='files to process')
 
 	args = parser.parse_args()
 	cpus = args.threads
 	minoverlap = args.minoverlap
+	buffersize = args.buffersize
 	filepaths = args.filepaths
+	
 	
 	messages = multiprocessing.Queue()
 	
@@ -799,7 +800,7 @@ if __name__ == '__main__':
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
 		sprint("Processing file: ", filename)
-		FASTQ_chunks = multiprocessing.Array(ctypes.c_char_p, decompressChunks(filepath))
+		FASTQ_chunks = multiprocessing.Array(ctypes.c_char_p, decompressChunks(filepath, buffersize))
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
@@ -843,9 +844,9 @@ if __name__ == '__main__':
 			#sprint(readsCounter[:])
 			del multiple_results
 		FASTQ_chunks = None
-		sprint("Releasing memory: Main thread")
+		sprint("Releasing memory: Main thread", end="\r")
 		gc.collect()
-		sprint("Done: Main thread")
+		sprint("Done: Main thread", end="\r")
 		updater.stop()
 		counterActive.value = False
 		
@@ -905,9 +906,9 @@ if __name__ == '__main__':
 		sprint("Shared dictionaries updated")
 		sprint("File processed succesfully")
 		previous_filenames.add(filename)
-		sprint("Releasing memory: Main thread")
+		sprint("Releasing memory: Main thread", end="\r")
 		gc.collect()
-		sprint("Done: Main thread")
+		sprint("Done: Main thread", end="\r")
 		
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
@@ -916,9 +917,11 @@ if __name__ == '__main__':
 	
 	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, list(s_data.keys()))
 	
+	sprint("Compressing the results")
+	
 	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
 		multiple_results = []
-		sprint("Compressing the results")
+		
 		for i in range(cpus):
 			multiple_results.append(pool.apply_async(gzCompress,args=((i*len(s_data))//cpus, ((i+1)*len(s_data))//cpus)))
 		
@@ -950,9 +953,9 @@ if __name__ == '__main__':
 	s_data.clear()
 	del s_data_keys
 	del s_data
-	sprint("Releasing memory: Main thread")
+	sprint("Releasing memory: Main thread", end="\r")
 	gc.collect()
-	sprint("Done: Main thread")
+	sprint("Done: Main thread", end="\r")
 	
 	sprint("Generating error table")
 	output = pathlib.Path(args.output)
