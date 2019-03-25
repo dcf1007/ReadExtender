@@ -13,6 +13,7 @@ import copy
 import ctypes
 import operator
 import inspect
+import math
 #from multiprocessing.process import current_process
 #current_process()._config["tempdir"] = "/dev/shm"
 
@@ -30,7 +31,6 @@ filenames = args.filenames
 
 
 readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+2)*4)
-readsLoaded = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+1))
 
 data_queue = multiprocessing.Queue()
 error_queue = multiprocessing.Queue()
@@ -175,7 +175,7 @@ def dedupe(seq, qual, stored_read):
 			return (2,consensus)
 
 
-def processReads(byteString, readsCounter_index = None):
+def processReads(byteString, procID = None):
 	'''
 	It adds the reads in byteString to the shared dictionary data
 	if they are correct/extended/overlapped or to the error
@@ -191,7 +191,7 @@ def processReads(byteString, readsCounter_index = None):
 	private_counter = [0,0,0,0]
 
 	#Counter contains an array("added", "identical", "extended", "error")
-	if readsCounter_index == None:
+	if procID == None:
 		print("Counter not initialised. Exiting")
 		exit()
 	
@@ -205,10 +205,10 @@ def processReads(byteString, readsCounter_index = None):
 		while file.tell() < len(byteString): 
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
-				readsCounter[readsCounter_index] += private_counter[0]
-				readsCounter[readsCounter_index + 1] += private_counter[1]
-				readsCounter[readsCounter_index + 2] += private_counter[2]
-				readsCounter[readsCounter_index + 3] += private_counter[3]
+				readsCounter[procID] += private_counter[0]
+				readsCounter[procID + 1] += private_counter[1]
+				readsCounter[procID + 2] += private_counter[2]
+				readsCounter[procID + 3] += private_counter[3]
 				private_counter = [0,0,0,0]
 
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
@@ -321,29 +321,23 @@ def processReads(byteString, readsCounter_index = None):
 	#In the case there were ducplicates in the source file which ended up in different processes
 	#We will dedupe them and add a single entry into s_data
 	#print("\n", os.getpid(), " - All reads processed. Waiting signal to add them to the shared dictionary")
-	readsLoaded[int(readsCounter_index/4)] = 1
-	print(readsLoaded[:])
 
-	readsCounter[readsCounter_index] += private_counter[0]
-	readsCounter[readsCounter_index + 1] += private_counter[1]
-	readsCounter[readsCounter_index + 2] += private_counter[2]
-	readsCounter[readsCounter_index + 3] += private_counter[3]
+	readsCounter[procID] += private_counter[0]
+	readsCounter[procID + 1] += private_counter[1]
+	readsCounter[procID + 2] += private_counter[2]
+	readsCounter[procID + 3] += private_counter[3]
 		
 	return p_data, p_error
 
-def init_processReads(readsCounter_, readsLoaded_):
-	global readsCounter, readsLoaded
+def init_processReads(readsCounter_):
+	global readsCounter
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
-	readsLoaded = readsLoaded_
 
 def gzip_nochunks_byte_u3():
 	global readsCounter
-	global readsLoaded
 	global s_data #Global shared dictionary containing the deduped reads
 	global s_error #Global shared dictionary containing the error reads
-	
-	#print(readsCounter[:])
-	#print(arr_index)
+
 	start_time = time.time()
 	for filename in filenames:
 		print("Loading ",filename," in RAM using ",cpus," processes")
@@ -376,29 +370,45 @@ def gzip_nochunks_byte_u3():
 			gzfile.seek(0)
 			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
 				print("Estimating compression ratio", end="\r")
+				#Seek the first 10MB (10485760 bytes) of uncompressed data
+				#file.seek(10485760)
 				file.seek(1000000)
+				
+				#Read the position of the pointers in the compressed and uncompressed data to estimate
+				#the compression ratio
 				c_ratio=gzfile.tell()/file.tell()
-				file.seek(0)
+				
 				print("Estimating compression ratio:",round(c_ratio,2))
-				print("Approx. decompressed file: ", round(c_size/c_ratio))
+				print("Approx. decompressed file: ", round(c_size/c_ratio), " bytes")
+				
+				#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
+				#As we are estimating the compression ratio with the first 10MB of uncompressed data it
+				#can always happen that we underestimate the size and a cpus+1 chunks are generated.
+				buffersize = math.ceil(c_size / (c_ratio * cpus))
+				#buffersize = int((c_size/c_ratio)/(cpus))
+				print("Using chunk size of: ", buffersize)
+				
+				
 				print("Decompressing and processing")
 				
-				buffersize=int((c_size/c_ratio)/(cpus))
+				#Seek the start of the file to start the real decompression
+				file.seek(0)
+				
+				#Initialise v_block
 				v_block=None
 				
-				
-				
-				print("Chunk size: ",buffersize)
 				print (time.strftime("%c"))
-				with multiprocessing.Pool(processes=(cpus+1), initializer=init_processReads, initargs=(readsCounter, readsLoaded)) as pool:
+				
+				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
+				#We pass the array to store the reads counted with an initialiser function so the different
+				#processes get it by inheritance and not as an argument
+				with multiprocessing.Pool(processes=(cpus+1), initializer=init_processReads, initargs=(readsCounter,)) as pool:
+					
+					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
+					
+					#Initialise porcessID number to keep track of the offset for each process to write in the shared arrays.
 					arr_index=0
-					#print(readsLoaded)
-					#print(readsLoaded[:])
-					for i in range(len(readsLoaded)):
-						readsLoaded[i] = 0
-					#print(readsLoaded)
-					#print(readsLoaded[:])
 					
 					#This loop allows to scan the whole file using chunks of defined size
 					while True:
@@ -625,14 +635,14 @@ def gzip_nochunks_byte_u3():
 		tot = 0
 		for i in range(cpus):
 			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
-			multiple_results.append(pool.apply_async(save4,args=(slice,)))
+			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
 			tot += len(slice)
 		print(tot)
 		print("Closing pool")
 		pool.close()
 		print("Joining pool")
 		pool.join()
-		with open('all_final.fastq.gz', 'wb') as fh:
+		with open('test10b.fastq.gz', 'wb') as fh:
 			for res in multiple_results:
 				fh.write(res.get())
 			fh.close()
@@ -651,30 +661,8 @@ def save1():
 		for key, value in s_data.items():
 			gzfile.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
 		gzfile.close()
-'''
-def save2():
-	print("Building file")
-	with io.BytesIO() as file:
-		for key, value in data.items():
-			file.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
-		print("Writting file")
-		with gzip.open('all_2.fastq.gz', 'wb') as gzfile:
-			gzfile.write(file.getvalue())
-			gzfile.close()
-		file.close()
-	print("Done")
 
-def save3():
-	gzfileStream = io.BytesIO()
-	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-		for key, value in data.items():
-			gzfile.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
-		gzfile.close()
-		with open('all_3.fastq.gz', 'wb') as fh:
-			fh.write(gzfileStream.getvalue())
-			fh.close()
-'''
-def save4(nameList):
+def gzCompress(nameList):
 	global s_data
 	gzfileStream = io.BytesIO()
 	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
