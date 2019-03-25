@@ -27,13 +27,15 @@ py = psutil.Process(os.getpid())
 
 parser = argparse.ArgumentParser(description='Dedupe.')
 parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
+parser.add_argument('--output','-o', type=str, help='threads to use')
 parser.add_argument('filenames', nargs='+', help='files to process')
 
 args = parser.parse_args()
 cpus = args.threads
 filenames = args.filenames
 
-readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+2)*4)
+readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
+readsCounterLock = multiprocessing.Lock()
 
 messages = multiprocessing.Queue()
 
@@ -61,16 +63,16 @@ def count(cpus, messages):
 	start_reads = sum(readsCounter[:])
 	while True:
 		if(cpus > 1):
-			reads_added = sum(operator.itemgetter(*range(0,len(readsCounter),4))(readsCounter))
-			reads_identical = sum(operator.itemgetter(*range(1,len(readsCounter),4))(readsCounter))
-			reads_extended = sum(operator.itemgetter(*range(2,len(readsCounter),4))(readsCounter))
-			reads_error = sum(operator.itemgetter(*range(3,len(readsCounter),4))(readsCounter))
+			reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
+			reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
+			reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
+			reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
 		else:
-			reads_added = readsCounter[0]
-			reads_identical = readsCounter[1]
-			reads_extended = readsCounter[2]
-			reads_error = readsCounter[3]
-		reads_total = sum(readsCounter[:])
+			reads_added = readsCounter[1]
+			reads_identical = readsCounter[2]
+			reads_extended = readsCounter[3]
+			reads_error = readsCounter[4]
+		reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
 		if not messages.empty():
 			while not messages.empty():
 				print(messages.get(), end="")
@@ -220,7 +222,7 @@ def dedupe(seq, qual, stored_read):
 			return (2,consensus)
 
 
-def processReads(byteString, procID = None):
+def processReads(byteString):
 	'''
 	It adds the reads in byteString to the shared dictionary data
 	if they are correct/extended/overlapped or to the error
@@ -229,6 +231,15 @@ def processReads(byteString, procID = None):
 	'''
 	global s_data
 	global s_error
+	procID = None
+	
+	with readsCounterLock:
+		while procID == None:
+			for counter in range(0,(len(readsCounter)-4),5):
+				if readsCounter[counter] == 0:
+					readsCounter[counter] = 1
+					procID = counter
+					break
 	
 	p_error={}
 	p_data={}
@@ -240,6 +251,9 @@ def processReads(byteString, procID = None):
 		print("Counter not initialised. Exiting")
 		exit()
 	
+	print("Allocated procID: ", procID)
+	#print(readsCounter[:])
+	time.sleep(1)
 	#Load the byteString into a byteStream to loop over it
 	with io.BytesIO(byteString) as file:
 
@@ -250,10 +264,10 @@ def processReads(byteString, procID = None):
 		while file.tell() < len(byteString): 
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
-				readsCounter[procID*4] += private_counter[0]
-				readsCounter[procID*4 + 1] += private_counter[1]
-				readsCounter[procID*4 + 2] += private_counter[2]
-				readsCounter[procID*4 + 3] += private_counter[3]
+				readsCounter[procID + 1] += private_counter[0]
+				readsCounter[procID + 2] += private_counter[1]
+				readsCounter[procID + 3] += private_counter[2]
+				readsCounter[procID + 4] += private_counter[3]
 				private_counter = [0,0,0,0]
 
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
@@ -366,20 +380,29 @@ def processReads(byteString, procID = None):
 	#In the case there were ducplicates in the source file which ended up in different processes
 	#We will dedupe them and add a single entry into s_data
 	#print("\n", os.getpid(), " - All reads processed. Waiting signal to add them to the shared dictionary")
+	#print(readsCounter[:])
+	readsCounter[procID + 1] += private_counter[0]
+	readsCounter[procID + 2] += private_counter[1]
+	readsCounter[procID + 3] += private_counter[2]
+	readsCounter[procID + 4] += private_counter[3]
+	
+		#print(readsCounter[:])
+	results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
+	
+	with readsCounterLock:
+		readsCounter[procID] = 0
+	print(readsCounter[:])
+	time.sleep(1)
+	return results
 
-	readsCounter[procID*4] += private_counter[0]
-	readsCounter[procID*4 + 1] += private_counter[1]
-	readsCounter[procID*4 + 2] += private_counter[2]
-	readsCounter[procID*4 + 3] += private_counter[3]
-		
-	return pickle.dumps((p_data, p_error), protocol=4)
-
-def init_processReads(readsCounter_):
-	global readsCounter
+def init_processReads(readsCounter_, readsCounterLock_):
+	global readsCounter, readsCounterLock
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
-
+	readsCounterLock = readsCounterLock_
+	
 def gzip_nochunks_byte_u3():
 	global readsCounter
+	global readsCounterLock
 	global s_data #Global shared dictionary containing the deduped reads
 	global s_error #Global shared dictionary containing the error reads
 	global messages
@@ -428,7 +451,11 @@ def gzip_nochunks_byte_u3():
 				#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
 				#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 				#can always happen that we underestimate the size and a cpus+1 chunks are generated.
-				buffersize = math.ceil(c_size / (c_ratio * cpus))
+				#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
+				if (c_size / (c_ratio * cpus)) > 1073741824:
+					buffersize = 1073741824
+				else:
+					buffersize = round(c_size / (c_ratio * cpus))
 				print("Using chunk size of: ", buffersize)
 				
 				print("Decompressing and processing")
@@ -445,13 +472,10 @@ def gzip_nochunks_byte_u3():
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
-				with multiprocessing.Pool(processes=(cpus+1), initializer=init_processReads, initargs=(readsCounter,)) as pool:
+				with multiprocessing.Pool(processes=cpus, initializer=init_processReads, initargs=(readsCounter,readsCounterLock)) as pool:
 					
 					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
-					
-					#Initialise porcessID number to keep track of the offset for each process to write in the shared arrays.
-					procID=0
 					
 					counter = multiprocessing.Process(target=count, args=(cpus,messages))
 					counter.start()
@@ -477,14 +501,11 @@ def gzip_nochunks_byte_u3():
 								v_block = chunk
 								
 								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								sprint(int(procID+1), " - File read in one chunk")
-								sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
-								
-								#Increase the offset of the shared array for the next process
-								procID += 1
+								sprint( " - File read in one chunk")
+								sprint("% - block ready - ", file.tell(), " sending job: ")
 								
 								break
 								
@@ -495,14 +516,11 @@ def gzip_nochunks_byte_u3():
 								v_block += chunk 
 								
 								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								sprint(int(procID+1), " - Last chunk")
-								sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
-								
-								#Increase the offset of the shared array for the next process
-								procID += 1
+								sprint(" - Last chunk")
+								sprint("% - block ready - ", file.tell(), " sending job: ")
 								
 								break
 								
@@ -514,7 +532,7 @@ def gzip_nochunks_byte_u3():
 							#At this point, v_block is not ready yet as we don't know if it ends in the middle of a sequence
 							v_block = chunk
 							
-							sprint(int(procID+1), " - Very beginning of the file")
+							sprint(" - Very beginning of the file")
 							
 						#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
 						#as the chunk may be ending in the middle of a sequence, and that's not good.
@@ -590,13 +608,10 @@ def gzip_nochunks_byte_u3():
 										v_block += chunk[:newblock]
 										
 										#Send a new process for the v_block
-										multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
+										multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
 										
-										sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
+										sprint("% - block ready - ", file.tell(), " sending job: ")
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-										
-										#Increase the offset of the shared array for the next process
-										procID += 1
 										
 										#Define the rest of the chunk as the new v_block
 										v_block = chunk[newblock:]
@@ -623,7 +638,7 @@ def gzip_nochunks_byte_u3():
 					u_data={}
 					u_error={}
 					for index, res in enumerate(multiple_results):
-						p_data, p_error = pickle.loads(res.get())
+						p_data, p_error = pickle.loads(zlib.decompress(res.get()))
 						#TODO: The saving code goes in here
 						#1. Create intersection between shared and private
 						duplicate_names = u_data.keys() & p_data.keys()
@@ -637,14 +652,14 @@ def gzip_nochunks_byte_u3():
 									p_data[name]=deduped[1]
 								else:
 									p_data.pop(name)
-								readsCounter[((cpus+1)*4) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+								readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 								#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 							else:
 								#TODO this should be added to the existing list
 								p_error[name]=[p_data[name], u_data[name]]
-								readsCounter[((cpus+1)*4) + 3] += 1 #error
+								readsCounter[(cpus*5) + 3] += 1 #error
 								#private_counter[3] += 1 #error
-							readsCounter[((cpus+1)*4)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+							readsCounter[(cpus*5)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
 							#private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
 						
 						duplicate_Enames = u_data.keys() & p_error.keys()
@@ -663,6 +678,10 @@ def gzip_nochunks_byte_u3():
 					counter.terminate()
 					s_data.update(u_data)
 					s_error.update(u_error)
+					p_data.clear()
+					p_error.clear()
+					multiple_results = []
+				gc.collect()
 		print("LOADED")
 	#Write the output to disk
 	
@@ -675,16 +694,17 @@ def gzip_nochunks_byte_u3():
 			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
 			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
 			tot += len(slice)
+			slice.clear()
 		print(tot)
 		print("Closing pool")
 		pool.close()
 		print("Joining pool")
 		pool.join()
-		with open('all_final_v12.fastq.gz', 'wb') as fh:
+		with open(args.output, 'wb') as fh:
 			for res in multiple_results:
 				fh.write(res.get())
 			fh.close()
-	
+		s_data_keys.clear()
 	print (time.strftime("%c"))
 	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
