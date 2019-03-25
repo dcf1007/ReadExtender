@@ -209,10 +209,10 @@ def processReads(byteString, procID = None):
 		while file.tell() < len(byteString): 
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
-				readsCounter[procID] += private_counter[0]
-				readsCounter[procID + 1] += private_counter[1]
-				readsCounter[procID + 2] += private_counter[2]
-				readsCounter[procID + 3] += private_counter[3]
+				readsCounter[procID*4] += private_counter[0]
+				readsCounter[procID*4 + 1] += private_counter[1]
+				readsCounter[procID*4 + 2] += private_counter[2]
+				readsCounter[procID*4 + 3] += private_counter[3]
 				private_counter = [0,0,0,0]
 
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
@@ -326,11 +326,11 @@ def processReads(byteString, procID = None):
 	#We will dedupe them and add a single entry into s_data
 	#print("\n", os.getpid(), " - All reads processed. Waiting signal to add them to the shared dictionary")
 
-	readsCounter[procID] += private_counter[0]
-	readsCounter[procID + 1] += private_counter[1]
-	readsCounter[procID + 2] += private_counter[2]
-	readsCounter[procID + 3] += private_counter[3]
-	
+	readsCounter[procID*4] += private_counter[0]
+	readsCounter[procID*4 + 1] += private_counter[1]
+	readsCounter[procID*4 + 2] += private_counter[2]
+	readsCounter[procID*4 + 3] += private_counter[3]
+		
 	return pickle.dumps((p_data, p_error), protocol=4)
 
 def init_processReads(readsCounter_):
@@ -341,7 +341,7 @@ def gzip_nochunks_byte_u3():
 	global readsCounter
 	global s_data #Global shared dictionary containing the deduped reads
 	global s_error #Global shared dictionary containing the error reads
-
+	
 	start_time = time.time()
 	for filename in filenames:
 		print("Loading ",filename," in RAM using ",cpus," processes")
@@ -376,7 +376,6 @@ def gzip_nochunks_byte_u3():
 				print("Estimating compression ratio", end="\r")
 				#Seek the first 10MB (10485760 bytes) of uncompressed data
 				file.seek(10485760)
-				#file.seek(1000000)
 				
 				#Read the position of the pointers in the compressed and uncompressed data to estimate
 				#the compression ratio
@@ -389,9 +388,7 @@ def gzip_nochunks_byte_u3():
 				#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 				#can always happen that we underestimate the size and a cpus+1 chunks are generated.
 				buffersize = math.ceil(c_size / (c_ratio * cpus))
-				#buffersize = int((c_size/c_ratio)/(cpus))
 				print("Using chunk size of: ", buffersize)
-				
 				
 				print("Decompressing and processing")
 				
@@ -412,8 +409,8 @@ def gzip_nochunks_byte_u3():
 					multiple_results=[]
 					
 					#Initialise porcessID number to keep track of the offset for each process to write in the shared arrays.
-					arr_index=0
-					
+					procID=0
+
 					#This loop allows to scan the whole file using chunks of defined size
 					while True:
 						#Read a chunk of length buffersize
@@ -421,7 +418,7 @@ def gzip_nochunks_byte_u3():
 						
 						#Chunk should be at least an empty byte string b''. Something went wrong if it's None
 						if chunk == None:
-							#print(int((arr_index/4)+1), " - EOF - flushing")
+							#print(int(procID+1), " - EOF - flushing")
 							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 							print("Error?")
 							exit()
@@ -435,14 +432,14 @@ def gzip_nochunks_byte_u3():
 								v_block = chunk
 								
 								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								print(int((arr_index/4)+1)," - File read in one chunk")
-								print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
+								print(int(procID+1)," - File read in one chunk")
+								print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
 								
 								#Increase the offset of the shared array for the next process
-								arr_index += 4
+								procID += 1
 								
 								break
 								
@@ -453,14 +450,14 @@ def gzip_nochunks_byte_u3():
 								v_block += chunk 
 								
 								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								print(int((arr_index/4)+1)," - Last chunk")
-								print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
+								print(int(procID+1)," - Last chunk")
+								print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
 								
 								#Increase the offset of the shared array for the next process
-								arr_index += 4
+								procID += 1
 								
 								break
 								
@@ -472,7 +469,7 @@ def gzip_nochunks_byte_u3():
 							#At this point, v_block is not ready yet as we don't know if it ends in the middle of a sequence
 							v_block = chunk
 							
-							print(int((arr_index/4)+1)," - Very beginning of the file")
+							print(int(procID+1)," - Very beginning of the file")
 							
 						#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
 						#as the chunk may be ending in the middle of a sequence, and that's not good.
@@ -548,13 +545,13 @@ def gzip_nochunks_byte_u3():
 										v_block += chunk[:newblock]
 										
 										#Send a new process for the v_block
-										multiple_results.append(pool.apply_async(processReads,args=(v_block, arr_index)))
+										multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 										
-										print(round(100*int((arr_index/4)+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int((arr_index/4)+1), end="\r")
+										print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 										
 										#Increase the offset of the shared array for the next process
-										arr_index += 4
+										procID += 1
 										
 										#Define the rest of the chunk as the new v_block
 										v_block = chunk[newblock:]
@@ -646,7 +643,7 @@ def gzip_nochunks_byte_u3():
 		pool.close()
 		print("Joining pool")
 		pool.join()
-		with open('test10b.fastq.gz', 'wb') as fh:
+		with open('all_final_v11.fastq.gz', 'wb') as fh:
 			for res in multiple_results:
 				fh.write(res.get())
 			fh.close()
@@ -660,11 +657,6 @@ def gzip_nochunks_byte_u3():
 	#data={}
 	gc.collect()
 
-def save1():
-	with gzip.open('all_1.fastq.gz', 'wb') as gzfile:
-		for key, value in s_data.items():
-			gzfile.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
-		gzfile.close()
 
 def gzCompress(nameList):
 	global s_data
