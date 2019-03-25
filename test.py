@@ -23,18 +23,20 @@ import threading
 def sprint(*args, end="\r\n"):
 	global messages
 	
-	columns, rows = os.get_terminal_size(0)
-	
 	finString = ""
 	for arg in args:
 		finString += str(arg)
-	messages.put(finString.ljust(columns, " ") + end)
+	
+	messages.put((end, finString))
+	
 	return True
 
 def count(cpus, messages):
 	#TODO: transform this into a singleton
 	global readsCounter
 	global counterActive
+	last_end = "\r\n"
+	columns, rows = os.get_terminal_size(0)
 	
 	while True:
 		
@@ -60,14 +62,27 @@ def count(cpus, messages):
 					reads_extended = readsCounter[3]
 					reads_error = readsCounter[4]
 					reads_total = sum(readsCounter[:]) - readsCounter[0]
-
-				while messages.empty() == False:
-					print(messages.get(), end = "", flush = True)
 				
-				print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
+				if messages.empty() == False:
+					if last_end == "\r":
+						print("\033[1A\033[K", end = "")
+					else:
+						print("\033[K", end = "")
+				
+					while messages.empty() == False:
+						message = messages.get()
+						print("\033[K", end = "")
+						print(message[1], end = message[0], flush = True)
+						last_end = message[0]
+					if last_end == "\r":
+						print("")
+				print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s", end="\r")
 		else:			
 			while messages.empty() == False:
-				print(messages.get(), end = "", flush = True)
+				message = messages.get()
+				print("\033[K", end = "")
+				print(message[1], end = message[0], flush = True)
+				last_end = message[0]
 	return
 
 def gzCompress(nameList):
@@ -618,8 +633,8 @@ def decompressChunks(gzfile):
 				#sprint("block ready - ", file.tell())
 				#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 				sprint( " - File read in one chunk")
-				
-				return v_block
+				yield v_block
+				return
 			
 			#If chunk length is 0 we have reached the end of the file
 			elif len(chunk) == 0:
@@ -637,7 +652,8 @@ def decompressChunks(gzfile):
 				#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 							
 				sprint(" - End of the file")
-				return v_block
+				yield v_block
+				return
 			
 			#If the pointer position equals buffersize, we are in the first chunk of a longer file
 			elif file.tell() == buffersize:
@@ -726,7 +742,7 @@ def decompressChunks(gzfile):
 							#sprint("Size c: ", sys.getsizeof(results_z))
 							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
 							
-							sprint(" |- block ready - ", file.tell())
+							sprint(" |- block ready - ", file.tell(), end = "\r")
 							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 							
 							yield v_block
@@ -736,7 +752,7 @@ def decompressChunks(gzfile):
 							break
 							
 				#print("inner wall exit")
-	sprint("100%")
+	#sprint("100%")
 	return
 			
 			
@@ -786,6 +802,7 @@ if __name__ == '__main__':
 					multiple_results.append(pool.apply_async(splitFile,args=(filepath,i,cpus)))
 					#pool.apply_async(splitFile,args=(filepath,my_shared_list,i,cpus))
 				#print("Closing pool")
+				sprint(len(multiple_results), " jobs succesfully sent")
 				pool.close()
 				pFinished = [0]*len(multiple_results)
 				while True:
@@ -798,7 +815,7 @@ if __name__ == '__main__':
 							sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
 					
 					if sum(pFinished) == len(pFinished):
-						sprint("Loaded")
+						sprint("File loaded")
 						#print("Joining pool")
 						pool.join()
 						break
@@ -822,10 +839,10 @@ if __name__ == '__main__':
 					updater.start()
 					
 					for chunk in decompressChunks(gzfile):
-						#sprint("sending job")
+						#sprint("Sending job ", len(multiple_results)+1, end="\r")
 						#Send a new process for the chunk
 						multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
-					
+					sprint(len(multiple_results), " jobs succesfully sent")
 					#print("Closing pool")
 					pool.close()
 					
@@ -840,9 +857,9 @@ if __name__ == '__main__':
 							if((res.ready()==True) and (pFinished[index] == 0)):
 								pFinished[index] = int(res.ready())
 								#print(res.get())
-								sprint(sum(pFinished), "/", len(pFinished), end="\r\n")
+								sprint(sum(pFinished), "/", len(pFinished), end="\r")
 						if sum(pFinished) == len(multiple_results):
-							sprint("DONE")
+							sprint(sum(pFinished), "/", len(pFinished), " DONE")
 							#sprint("Joining pool")
 							pool.join()
 							break
@@ -914,13 +931,16 @@ if __name__ == '__main__':
 		for filename in error_files:
 			error_files[filename].close()
 	
+	s_data.clear()
+	s_error.clear()
+	
 	sprint (time.strftime("%c"))
-	sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	#sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
 	#print(timeit.Timer(save1).timeit(number=1))
 	#print(timeit.Timer(save2).timeit(number=1))
 	#print(timeit.Timer(save3).timeit(number=1))
 	#data={}
-	gc.collect()
+	#gc.collect()
 
-	sprint (time.strftime("%c"))
+	#sprint (time.strftime("%c"))
