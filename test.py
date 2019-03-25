@@ -33,16 +33,57 @@ args = parser.parse_args()
 cpus = args.threads
 filenames = args.filenames
 
-
 readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*(cpus+2)*4)
 
-data_queue = multiprocessing.Queue()
-error_queue = multiprocessing.Queue()
+messages = multiprocessing.Queue()
+
 s_data = dict()
 s_error = dict()
 
 #lock_manager = manager.Lock()
 #locked = multiprocessing.RawValue(ctypes.c_bool, False)
+
+def sprint(*args, end="\r\n"):
+	global messages
+	
+	columns, rows = os.get_terminal_size(0)
+	
+	finString = ""
+	for arg in args:
+		finString += str(arg)
+	messages.put(finString.ljust(columns, " ") + end)
+	return True
+
+def count(cpus, messages):
+	global readsCounter
+
+	start_time = time.time()
+	start_reads = sum(readsCounter[:])
+	while True:
+		if(cpus > 1):
+			reads_added = sum(operator.itemgetter(*range(0,len(readsCounter),4))(readsCounter))
+			reads_identical = sum(operator.itemgetter(*range(1,len(readsCounter),4))(readsCounter))
+			reads_extended = sum(operator.itemgetter(*range(2,len(readsCounter),4))(readsCounter))
+			reads_error = sum(operator.itemgetter(*range(3,len(readsCounter),4))(readsCounter))
+		else:
+			reads_added = readsCounter[0]
+			reads_identical = readsCounter[1]
+			reads_extended = readsCounter[2]
+			reads_error = readsCounter[3]
+		reads_total = sum(readsCounter[:])
+		if not messages.empty():
+			while not messages.empty():
+				print(messages.get(), end="")
+		print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
+	return True
+
+def gzCompress(nameList):
+	global s_data
+	gzfileStream = io.BytesIO()
+	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
+		for name in nameList:
+			gzfile.write(name+b"\n"+s_data[name][0]+b"\n+\n"+s_data[name][1]+b"\n")
+	return gzfileStream.getvalue()
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -341,8 +382,8 @@ def gzip_nochunks_byte_u3():
 	global readsCounter
 	global s_data #Global shared dictionary containing the deduped reads
 	global s_error #Global shared dictionary containing the error reads
+	global messages
 	
-	start_time = time.time()
 	for filename in filenames:
 		print("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
@@ -400,6 +441,7 @@ def gzip_nochunks_byte_u3():
 				
 				print (time.strftime("%c"))
 				
+				
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
@@ -410,7 +452,10 @@ def gzip_nochunks_byte_u3():
 					
 					#Initialise porcessID number to keep track of the offset for each process to write in the shared arrays.
 					procID=0
-
+					
+					counter = multiprocessing.Process(target=count, args=(cpus,messages))
+					counter.start()
+					
 					#This loop allows to scan the whole file using chunks of defined size
 					while True:
 						#Read a chunk of length buffersize
@@ -420,7 +465,7 @@ def gzip_nochunks_byte_u3():
 						if chunk == None:
 							#print(int(procID+1), " - EOF - flushing")
 							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-							print("Error?")
+							sprint("Error?")
 							exit()
 							break
 						#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
@@ -435,8 +480,8 @@ def gzip_nochunks_byte_u3():
 								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								print(int(procID+1)," - File read in one chunk")
-								print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
+								sprint(int(procID+1), " - File read in one chunk")
+								sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
 								
 								#Increase the offset of the shared array for the next process
 								procID += 1
@@ -453,8 +498,8 @@ def gzip_nochunks_byte_u3():
 								multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								print(int(procID+1)," - Last chunk")
-								print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
+								sprint(int(procID+1), " - Last chunk")
+								sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
 								
 								#Increase the offset of the shared array for the next process
 								procID += 1
@@ -469,7 +514,7 @@ def gzip_nochunks_byte_u3():
 							#At this point, v_block is not ready yet as we don't know if it ends in the middle of a sequence
 							v_block = chunk
 							
-							print(int(procID+1)," - Very beginning of the file")
+							sprint(int(procID+1), " - Very beginning of the file")
 							
 						#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
 						#as the chunk may be ending in the middle of a sequence, and that's not good.
@@ -547,7 +592,7 @@ def gzip_nochunks_byte_u3():
 										#Send a new process for the v_block
 										multiple_results.append(pool.apply_async(processReads,args=(v_block, procID)))
 										
-										print(round(100*int(procID+1)/(cpus+1)), "% - block ready - ",file.tell()," sending job: ", int(procID+1), end="\r")
+										sprint(round(100*int(procID+1)/(cpus+1)), "% - block ready - ", file.tell(), " sending job: ", int(procID+1))
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 										
 										#Increase the offset of the shared array for the next process
@@ -558,34 +603,22 @@ def gzip_nochunks_byte_u3():
 										
 										break
 							#print("inner wall exit")
-					print(100,"%",end="\r\n")
-					print("Closing pool")
+					sprint("100%")
+					#print("Closing pool")
 					pool.close()
-					print("Waiting for results to be ready")
+					sprint("Waiting for results to be ready")
 					pFinished = [0]*len(multiple_results)
 					while True:
 						for index, res in enumerate(multiple_results):
-							#if((res.ready()==True) and (pFinished[index] == 0)):
-							pFinished[index] = int(res.ready())
-						if(cpus > 1):
-							reads_added = sum(operator.itemgetter(*range(0,len(readsCounter),4))(readsCounter))
-							reads_identical = sum(operator.itemgetter(*range(1,len(readsCounter),4))(readsCounter))
-							reads_extended = sum(operator.itemgetter(*range(2,len(readsCounter),4))(readsCounter))
-							reads_error = sum(operator.itemgetter(*range(3,len(readsCounter),4))(readsCounter))
-						else:
-							reads_added = readsCounter[0]
-							reads_identical = readsCounter[1]
-							reads_extended = readsCounter[2]
-							reads_error = readsCounter[3]
-						reads_total = sum(readsCounter[:])
-						print(sum(pFinished),"/",len(multiple_results),"Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round(reads_total/(time.time()-start_time)), " reads/s              ", end="\r")
+							if((res.ready()==True) and (pFinished[index] == 0)):
+								pFinished[index] = int(res.ready())
+								sprint(sum(pFinished), "/", len(multiple_results))
 						if sum(pFinished) == len(multiple_results):
-							print(sum(pFinished),"/",len(multiple_results),"Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "                                                                             ")
-							print("DONE")
-							print(readsCounter[:])
+							sprint("DONE")
+							sprint(readsCounter[:])
 							break
 						time.sleep(1)
-					print("Joining pool")
+					sprint("Joining pool")
 					pool.join()
 					u_data={}
 					u_error={}
@@ -594,6 +627,7 @@ def gzip_nochunks_byte_u3():
 						#TODO: The saving code goes in here
 						#1. Create intersection between shared and private
 						duplicate_names = u_data.keys() & p_data.keys()
+						sprint("Found ", len(duplicate_names), " duplicates")
 						#2. Dedupe whatever is in the intersection and update in the private
 						for name in duplicate_names:
 							deduped = dedupe(p_data[name][0], p_data[name][0], u_data[name])
@@ -618,12 +652,15 @@ def gzip_nochunks_byte_u3():
 							u_data.pop(name)
 							
 						#3. Update the shared with the private data and update the counter
+						sprint("Updating the file dictionary")
 						u_data.update(p_data)
 						u_error.update(p_error)
 						p_data.clear()
 						p_error.clear()
-						print(index, "Ready", end="\r")
-					print("outer wall exit")
+						sprint(index, "Ready")
+					#print("outer wall exit")
+					sprint("Updating the shared dictionary")
+					counter.terminate()
 					s_data.update(u_data)
 					s_error.update(u_error)
 		print("LOADED")
@@ -643,7 +680,7 @@ def gzip_nochunks_byte_u3():
 		pool.close()
 		print("Joining pool")
 		pool.join()
-		with open('all_final_v11.fastq.gz', 'wb') as fh:
+		with open('all_final_v12.fastq.gz', 'wb') as fh:
 			for res in multiple_results:
 				fh.write(res.get())
 			fh.close()
@@ -656,15 +693,6 @@ def gzip_nochunks_byte_u3():
 	#print(timeit.Timer(save3).timeit(number=1))
 	#data={}
 	gc.collect()
-
-
-def gzCompress(nameList):
-	global s_data
-	gzfileStream = io.BytesIO()
-	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-		for name in nameList:
-			gzfile.write(name+b"\n"+s_data[name][0]+b"\n+\n"+s_data[name][1]+b"\n")
-	return gzfileStream.getvalue()
 
 ncbu3=timeit.Timer(gzip_nochunks_byte_u3).timeit(number=1)
 
