@@ -9,6 +9,8 @@ import gc
 import argparse
 import psutil
 import multiprocessing
+from multiprocessing.sharedctypes import Value, Array, RawArray
+import copy
 
 print (time.strftime("%c"))
 mypid=os.getpid()
@@ -24,8 +26,8 @@ filenames = args.filenames
 manager = multiprocessing.Manager()
 data_manager = manager.dict()
 error_manager = manager.dict()
-counter_manager=manager.dict({"total":0, "added":0, "identical":0, "extended":0, "error":0})
-lock_manager = manager.Lock()
+counter_manager=manager.dict({"added":manager.dict(), "identical":manager.dict(), "extended":manager.dict(), "error":manager.dict()})
+counters = []
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -112,7 +114,73 @@ def safe_readline(byteStream):
 	
 	return line
 
-def processReads(byteString, data, error, lock, counter = None):
+def count():
+	gru={"total":0, "added":0, "identical":0, "extended":0, "error":0}
+	if len(counters) > 0:
+		for jj in counters:
+			gru["total"] += jj[0] + jj[1] + jj[2] + jj[3]
+			gru["added"] += jj[0]
+			gru["identical"] += jj[1]
+			gru["extended"] += jj[2]
+			gru["error"] += jj[3]
+	print(gru)
+	return gru
+
+def dedupe(seq, qual, stored_read):
+	#Check if reads are identical. Omit if so.
+	if seq == stored_read[0]:
+		#print("identical",)
+		return (1,stored_read)
+		pass
+	
+	#Check if the new read is contained in the stored read. Omit if so.
+	elif seq in stored_read[0]:
+		#print("s_read is longer")
+		return (2,stored_read)
+		pass
+	
+	#Check if the stored read is contained in the new read.
+	elif stored_read[0] in seq:
+		#print("seq is longer, storing")
+		return (2,(seq,qual))
+	
+	#If reads were neither identical nor contained, try to find a perfect overlap
+	else:
+		#Try to find overlap:
+		#read1
+		#----------------
+		#          ---------------
+		#          read2
+		consensus = best_overlap(seq,qual,stored_read[0],stored_read[1])
+		
+		#Check if overlap was found
+		if consensus == -1:
+			#Try to find overlap:
+			#read2
+			#----------------
+			#          ---------------
+			#          read1
+			consensus=best_overlap(stored_read[0],stored_read[1],seq,qual)
+		
+		#Check if overlap was found
+		if consensus == -1:
+			return None
+			
+		#If overlap was found
+		else:
+			#Add consensus (contains SEQ and QUAL) to data dict
+			#print("consensus found",)
+			return (2,consensus)
+
+
+def processReads(byteString, s_data, s_error):
+	print(len(counters))
+	print(len(counters[-1]))
+	print("BOOOO")
+	#Counter contains an array("added", "identical", "extended", "error")
+	p_error={}
+	p_data={}
+	
 	'''
 	It adds the reads in byteString to the shared dictionary data
 	if they are correct/extended/overlapped or to the error
@@ -124,158 +192,101 @@ def processReads(byteString, data, error, lock, counter = None):
 
 		#Make sure we are at the beginning of the stream.
 		file.seek(0)
-
+		
 		#Execute until we reach the EOF
 		while file.tell() < len(byteString): 
-
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
 			#3rd line is useless and ignored.
 			#safe_readline() makes sure we do not load empty lines on the way.
-			name = safe_readline(file) 
-			read = safe_readline(file)
+			name = safe_readline(file)
+			seq = safe_readline(file)
 			safe_readline(file)
 			qual = safe_readline(file)
 			
 			#If for some reason the file has empty lines at the end of the file, safe_readline will return b''
-			if (name==b'' or read==b'' or qual==b''):
-				assert name==read==qual==b'', "Error: read not loaded correctly\nName: "+name.decode("UTF-8")+"\nRead: "+read.decode("UTF-8")+"\n Qual: "+qual.decode("UTF-8")
+			if (name==b'' or seq==b'' or qual==b''):
+				assert name==seq==qual==b'', "Error: read not loaded correctly\nName: "+name.decode("UTF-8")+"\nRead: "+seq.decode("UTF-8")+"\n Qual: "+qual.decode("UTF-8")
 				#print(os.getpid(),": EOF reached with newlines at the end of the file")
 				break
 				'''
-				if name==read==qual==b'':
+				if name==seq==qual==b'':
 					print(os.getpid(),": EOF reached with newlines at the end of the file")
 				else:
 					print("Error: read not loaded correctly")
 					exit()
 				'''
-			#Only process if READ and QUAL are well-formed
-			if (len(read) == len(qual)): 
-				
+			if name in p_error:
+				p_error[name].append((seq,qual))
+				counter[3] += 1
+			elif name in s_error:
+				#print(name.decode("UTF-8"),": error",)
+				#OBS! We do not copy s_error therefore error MUS BE APPEND to s_error in the merge
+				p_error[name]=[(seq,qual)]
+				counter[3] += 1
+			#Only process if SEQ and QUAL are well-formed
+			elif (len(seq) == len(qual)): 
 				#Lock to prevent different processes writting simultaneously to the dictionary
-				with lock:
-					#Verify the name starts with @ as a FASTQ read should
-					#We need to extract it as a range instead of just the first character to
-					#get a byte string and not an int representing the chararcter.
-					#if name[0:1]!=b"@":
-					#Alternatively we can convert the character into the ASCII int instead.
-					assert name[0]==ord("@"), "Something is wrong in " + name.decode("UTF-8")
-					'''
-					if name[0]!=ord("@"):
-						print(name.decode("utf-8"))
-						print("Something is wrong")
-						exit()
-					'''
-					#Check if the read name is in the error dictionary.
-					#If the read name is in the error dict means previous conflict with the
-					#read, so add the new read there and do not process.
-					#elif name in error:
-					if name in error:
-						#print(name.decode("UTF-8"),": error",)
-						error[name].append((read,qual))
-						if counter:
-							counter["total"] += 1
-							counter["error"] += 1
-					#Check if the read name is in the data dictionary. If so, process
-					elif name in data:
-						#Load the READ and QUAL values stored
-						s_read = data[name][0]
-						s_qual = data[name][1]
-						
-						#Check if reads are identical. Omit if so.
-						if read == s_read:
-							#print(name.decode("UTF-8"),": identical",)
-							if counter:
-								counter["total"] += 1
-								counter["identical"] += 1
-							pass
-						
-						#Check if the new read is contained in the stored read. Omit if so.
-						elif read in s_read:
-							#print(name.decode("UTF-8"),": s_read is longer")
-							if counter:
-								counter["total"] += 1
-								counter["extended"] += 1
-							pass
-						
-						#Check if the stored read is contained in the new read.
-						elif s_read in read:
-							#print(name.decode("UTF-8"),": read is longer, storing")
-							data[name]=(read,qual)
-							if counter:
-								counter["total"] += 1
-								counter["extended"] += 1
-						
-						#If reads were neither identical nor contained, try to find a perfect overlap
-						else:
-							#Try to find overlap:
-							#read1
-							#----------------
-							#          ---------------
-							#          read2
-							consensus = best_overlap(read,qual,s_read,s_qual)
-							
-							#Check if overlap was found
-							if consensus == -1:
-								#Try to find overlap:
-								#read2
-								#----------------
-								#          ---------------
-								#          read1
-								consensus=best_overlap(s_read,s_qual,read,qual)
-							
-							#Check if overlap was found
-							if consensus == -1:
-								
-								#If overlap was not found, transfer read to error dict and
-								#make sure is erased from data dict too
-								if name in error:
-									error[name].append((read,qual))
-								else:
-									error[name]=[(s_read,s_qual),(read,qual)]
-									data.pop(name)
-								#print(name.decode("UTF-8"),": error",)
-								if counter:
-									counter["total"] += 1
-									counter["error"] += 1
-							
-							#If overlap was found
-							else:
-								#Add consensus (contains READ and QUAL) to data dict
-								data[name]=consensus
-								#print(name.decode("UTF-8"),": consensus found",)
-								if counter:
-									counter["total"] += 1
-									counter["extended"] += 1
-					
-					#The read was not found in any dictionary. Add to data dict
-					else:
+
+				#Verify the name starts with @ as a FASTQ read should
+				#We need to extract it as a range instead of just the first character to
+				#get a byte string and not an int representing the chararcter.
+				#if name[0:1]!=b"@":
+				#Alternatively we can convert the character into the ASCII int instead.
+				assert name[0]==ord("@"), "Something is wrong in " + name.decode("UTF-8")
+				'''
+				if name[0]!=ord("@"):
+					print(name.decode("utf-8"))
+					print("Something is wrong")
+					exit()
+				'''
+				#Try to get the read. If not it returns None
+				s_read = s_data.get(name, None)
+				p_read = p_data.get(name, None)
+				#Check if the read name is in the error dictionary.
+				#If the read name is in the error dict means previous conflict with the
+				#read, so add the new read there and do not process.
+
+				#Check if the read name is not in the data dictionary.
+				if p_read == None:
+					if s_read == None:
 						#print(name.decode("UTF-8"),": adding new read",)
-						data[name]=(read,qual)
-						if counter:
-							counter["total"] += 1
-							counter["added"] += 1
-			
-			#If READ and QUAL have different lengths
+						p_data[name]=(seq,qual)
+						counter[0] += 1
+					else:
+						#print("DEDUPE shared")
+						deduped = dedupe(seq, qual, s_read)
+						if deduped:
+							p_data[name]=deduped[1]
+							counter[deduped[0]] += 1
+						else:
+							p_error[name]=[(seq,qual), s_read]
+							counter[3] += 1
+							pass
+				else:
+					#print("DEDUPE private")
+					deduped = dedupe(seq, qual, p_read)
+					if deduped:
+						p_data[name]=deduped[1]
+						counter[deduped[0]] += 1
+					else:
+						#TODO this should be added to the existing list
+						p_error[name]=[(seq,qual), p_read]
+						counter[3] += 1
+						
+			#If SEQ and QUAL have different lengths
 			else:
 				#Transfer read to error dict and make sure is erased from data dict too
-				if name in error:
-					error[name].append((read,qual))
-				else:
-					error[name]=[(s_read,s_qual),(read,qual)]
-					data.pop(name)
-				print("Error: SEQ and QUAL have different lenghts.")
-				if counter:
-					counter["total"] += 1
-					counter["error"] += 1
-			#print("leaving if (len(read) == len(qual))")
-		#print("leaving while")
-		
+				#print("Error: SEQ and QUAL have different lenghts.")
+				p_error[name]=[(seq,qual)]
+				#data.pop(name)
+				counter[3] += 1
+			#print("leaving if (len(seq) == len(qual))")
 		#When while reaches EOF
 		else:
 			#print(os.getpid(),"EOF reached with while")
 			pass
-	
 	#print("leaving function")
+	
 	return True
 
 
@@ -296,7 +307,6 @@ def gzip_nochunks_byte_u3():
 					for res in multiple_results:
 						pFinished += res.ready()
 					print("Loaded: ", round(100*pFinished/len(multiple_results)),"%", end="\r")
-					pReads=counter_manager["total"]
 					if pFinished == len(multiple_results):
 						print("Loaded")
 						break
@@ -336,20 +346,27 @@ def gzip_nochunks_byte_u3():
 							if v_block == None:
 								#print(i," - File read in one chunk")
 								v_block = chunk
-								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\r")
+								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\n\r")
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 								#print("sending job: ", i)
 								#processReads(v_block, data_manager, error_manager, lock_manager)
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager, counter_manager)))
+								counters.append(RawArray('i',4))
+								print(len(counters))
+								#multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, counters[-1])))
+								processReads(v_block, data_manager, error_manager)
+
 								break
 							else:
 								#print(i," - Last chunk")
 								v_block += chunk
-								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\r")
+								print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\n\r")
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 								#print("sending job: ", i)
 								#processReads(v_block, data_manager, error_manager, lock_manager)
-								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager, counter_manager)))
+								counters.append(RawArray('i',4))
+
+								#multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, counters[-1])))
+								processReads(v_block, data_manager, error_manager)
 								break
 						elif file.tell() == buffersize:
 							#print(i," - Very beginning of the file")
@@ -373,11 +390,13 @@ def gzip_nochunks_byte_u3():
 										#print("first \\n@ before \\n+:  ",chunk.rfind(b"\n@",x0,x))
 										newblock = chunk.rfind(b"\n@",x0,x)+1
 										v_block += chunk[:newblock]
-										print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\r")
+										print(round(100*i/(cpus+1)), "% - block ready - ",file.tell(),end="\n\r")
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 										#print("sending job: ", i)
-										#processReads(v_block, data_manager, error_manager, lock_manager)
-										multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager, counter_manager)))
+										counters.append(RawArray('i',4))
+										print(len(counters))
+										multiple_results.append(pool.apply(processReads,args=(v_block, data_manager, error_manager)))
+										#processReads(v_block, data_manager, error_manager, counters[-1])
 										v_block = chunk[newblock:]
 										i+=1
 										break
@@ -390,16 +409,20 @@ def gzip_nochunks_byte_u3():
 						pFinished=0
 						for res in multiple_results:
 							pFinished += res.ready()
-						pReads=counter_manager["total"]
+						counter_total = count()
+						pReads=counter_total["total"]
 						time.sleep(1)
-						print(pFinished,"/",len(multiple_results),"Tot: ", counter_manager["total"],"Added: ", counter_manager["added"]," Iden: ", counter_manager["identical"]," Ext: ", counter_manager["extended"]," Err: ", counter_manager["error"], "Speed: ", counter_manager["total"]-pReads, " reads/s", end="\r")
+						counter_total = count()
+						print(pFinished,"/",len(multiple_results),"Tot: ", counter_total["total"],"Added: ", counter_total["added"]," Iden: ", counter_total["identical"]," Ext: ", counter_total["extended"]," Err: ", counter_total["error"], "Speed: ", counter_total["total"] - pReads, " reads/s              ", end="\r")
 						if pFinished == len(multiple_results):
-							break
-					#print("Joining pool")
+							print("DONE")
+							print(pFinished,"/",len(multiple_results),"Tot: ", counter_total["total"],"Added: ", counter_total["added"]," Iden: ", counter_total["identical"]," Ext: ", counter_total["extended"]," Err: ", counter_total["error"], "                             ")
+							print(counter_total)
+							#break
+					print("Joining pool")
 					pool.join()
-					#print("outer wall exit")
+					print("outer wall exit")
 		print("LOADED")
-		print(len(data_manager))
 	#Write the output to disk
 	'''
 	with multiprocessing.Pool(3) as pool:
@@ -416,7 +439,6 @@ def gzip_nochunks_byte_u3():
 	#print(timeit.Timer(save1).timeit(number=1))
 	#print(timeit.Timer(save2).timeit(number=1))
 	#print(timeit.Timer(save3).timeit(number=1))
-	exit()
 	#data={}
 	gc.collect()
 '''
@@ -456,3 +478,6 @@ ncbu3=timeit.Timer(gzip_nochunks_byte_u3).timeit(number=1)
 print("ncbu3=",ncbu3)
 
 print (time.strftime("%c"))
+#Terminate the counter
+counter.terminate()
+exit()
