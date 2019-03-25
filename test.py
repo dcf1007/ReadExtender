@@ -412,7 +412,7 @@ def gzip_nochunks_byte_u3():
 	global s_error #Global shared dictionary containing the error reads
 	global messages
 	
-	previous_filename = ""
+	previous_filenames = []
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
 		print("Loading ",filename," in RAM using ",cpus," processes")
@@ -696,9 +696,10 @@ def gzip_nochunks_byte_u3():
 						if Ename not in s_error:
 							s_error[Ename] = dict()
 						if Ename in s_data:
-							if previous_filename not in s_error[Ename]:
-								s_error[Ename][previous_filename] = list()
-							s_error[Ename][previous_filename].append(s_data[Ename])
+							for previous_filename in previous_filenames:
+								if previous_filename not in s_error[Ename]:
+									s_error[Ename][previous_filename] = list()
+								s_error[Ename][previous_filename].append(s_data[Ename])
 							s_data.pop(Ename)
 						if filename not in s_error[Ename]:
 							s_error[Ename][filename] = list()
@@ -712,7 +713,7 @@ def gzip_nochunks_byte_u3():
 					del multiple_results
 				gc.collect()
 		print("LOADED")
-		previous_filename = filename
+		previous_filenames.append(filename)
 	#Write the output to disk
 	print("S_data: ", len(s_data))
 	with multiprocessing.Pool(cpus) as pool:
