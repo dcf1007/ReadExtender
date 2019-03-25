@@ -251,9 +251,10 @@ def processReads(byteString):
 		print("Counter not initialised. Exiting")
 		exit()
 	
-	print("Allocated procID: ", procID)
+	#print("Allocated procID: ", procID)
 	#print(readsCounter[:])
-	time.sleep(1)
+	#time.sleep(1)
+	
 	#Load the byteString into a byteStream to loop over it
 	with io.BytesIO(byteString) as file:
 
@@ -391,8 +392,8 @@ def processReads(byteString):
 	
 	with readsCounterLock:
 		readsCounter[procID] = 0
-	print(readsCounter[:])
-	time.sleep(1)
+	#print(readsCounter[:])
+	#time.sleep(1)
 	return results
 
 def init_processReads(readsCounter_, readsCounterLock_):
@@ -401,6 +402,7 @@ def init_processReads(readsCounter_, readsCounterLock_):
 	readsCounterLock = readsCounterLock_
 	
 def gzip_nochunks_byte_u3():
+	global cpus
 	global readsCounter
 	global readsCounterLock
 	global s_data #Global shared dictionary containing the deduped reads
@@ -623,9 +625,47 @@ def gzip_nochunks_byte_u3():
 					pool.close()
 					sprint("Waiting for results to be ready")
 					pFinished = [0]*len(multiple_results)
+					u_data={}
+					u_error={}
 					while True:
 						for index, res in enumerate(multiple_results):
 							if((res.ready()==True) and (pFinished[index] == 0)):
+								p_data, p_error = pickle.loads(zlib.decompress(res.get()))
+								#TODO: The saving code goes in here
+								#1. Create intersection between shared and private
+								duplicate_names = u_data.keys() & p_data.keys()
+								sprint("Found ", len(duplicate_names), " duplicates")
+								#2. Dedupe whatever is in the intersection and update in the private
+								for name in duplicate_names:
+									deduped = dedupe(p_data[name][0], p_data[name][0], u_data[name])
+									if deduped:
+										#Only rewrite the read if it has been extended. If identical, pop from p_data.
+										if(deduped[0] == 2):
+											p_data[name]=deduped[1]
+										else:
+											p_data.pop(name)
+										readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+										#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+									else:
+										#TODO this should be added to the existing list
+										p_error[name]=[p_data[name], u_data[name]]
+										readsCounter[(cpus*5) + 3] += 1 #error
+										#private_counter[3] += 1 #error
+									readsCounter[(cpus*5)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+									#private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+								
+								duplicate_Enames = u_data.keys() & p_error.keys()
+								for Ename in duplicate_Enames:
+									u_data.pop(name)
+									
+								#3. Update the shared with the private data and update the counter
+								sprint("Updating the file dictionary")
+								u_data.update(p_data)
+								u_error.update(p_error)
+								p_data.clear()
+								p_error.clear()
+								sprint(index, "Ready")
+							
 								pFinished[index] = int(res.ready())
 								sprint(sum(pFinished), "/", len(multiple_results))
 						if sum(pFinished) == len(multiple_results):
@@ -635,47 +675,11 @@ def gzip_nochunks_byte_u3():
 						time.sleep(1)
 					sprint("Joining pool")
 					pool.join()
-					u_data={}
-					u_error={}
-					for index, res in enumerate(multiple_results):
-						p_data, p_error = pickle.loads(zlib.decompress(res.get()))
-						#TODO: The saving code goes in here
-						#1. Create intersection between shared and private
-						duplicate_names = u_data.keys() & p_data.keys()
-						sprint("Found ", len(duplicate_names), " duplicates")
-						#2. Dedupe whatever is in the intersection and update in the private
-						for name in duplicate_names:
-							deduped = dedupe(p_data[name][0], p_data[name][0], u_data[name])
-							if deduped:
-								#Only rewrite the read if it has been extended. If identical, pop from p_data.
-								if(deduped[0] == 2):
-									p_data[name]=deduped[1]
-								else:
-									p_data.pop(name)
-								readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-								#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-							else:
-								#TODO this should be added to the existing list
-								p_error[name]=[p_data[name], u_data[name]]
-								readsCounter[(cpus*5) + 3] += 1 #error
-								#private_counter[3] += 1 #error
-							readsCounter[(cpus*5)] -= 1 #Substract the read from added as it has been added to either identical, extended or error
-							#private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
-						
-						duplicate_Enames = u_data.keys() & p_error.keys()
-						for Ename in duplicate_Enames:
-							u_data.pop(name)
-							
-						#3. Update the shared with the private data and update the counter
-						sprint("Updating the file dictionary")
-						u_data.update(p_data)
-						u_error.update(p_error)
-						p_data.clear()
-						p_error.clear()
-						sprint(index, "Ready")
 					#print("outer wall exit")
 					sprint("Updating the shared dictionary")
 					counter.terminate()
+					print("")
+					print(len(u_data))
 					s_data.update(u_data)
 					s_error.update(u_error)
 					p_data.clear()
@@ -684,17 +688,18 @@ def gzip_nochunks_byte_u3():
 				gc.collect()
 		print("LOADED")
 	#Write the output to disk
-	
+	print("S_data: ", len(s_data))
 	with multiprocessing.Pool(cpus) as pool:
 		multiple_results = []
 		s_data_keys = list(s_data.keys())
 		ks = len(s_data_keys)
+		print("S_data_keys: ", len(s_data_keys))
 		tot = 0
 		for i in range(cpus):
 			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
 			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
 			tot += len(slice)
-			slice.clear()
+			#slice.clear()
 		print(tot)
 		print("Closing pool")
 		pool.close()
@@ -702,6 +707,7 @@ def gzip_nochunks_byte_u3():
 		pool.join()
 		with open(args.output, 'wb') as fh:
 			for res in multiple_results:
+				#print(gzip.decompress(res.get()))
 				fh.write(res.get())
 			fh.close()
 		s_data_keys.clear()
