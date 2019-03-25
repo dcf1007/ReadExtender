@@ -32,6 +32,7 @@ def sprint(*args, end="\r\n"):
 	return True
 
 def count(cpus, messages):
+	#TODO: transform this into a singleton
 	global readsCounter
 	global counterActive
 	
@@ -60,17 +61,13 @@ def count(cpus, messages):
 					reads_error = readsCounter[4]
 					reads_total = sum(readsCounter[:]) - readsCounter[0]
 
-				while not messages.empty():
-					print(messages.get(), end="")
+				while messages.empty() == False:
+					print(messages.get(), end = "", flush = True)
 				
 				print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
-				
-				time.sleep(0.1)
-		
-		while not messages.empty():
-			print(messages.get(), end="")
-			
-		time.sleep(0.1)
+		else:			
+			while messages.empty() == False:
+				print(messages.get(), end = "", flush = True)
 	return
 
 def gzCompress(nameList):
@@ -144,7 +141,7 @@ def getChunk(sourceFile, i, n_chunks):
 		#Obtain the size of the file
 		size=os.fstat(fh.fileno()).st_size
 		#Calculate the size of the chunks
-		chunksize=round(size/n_chunks)
+		chunksize=math.ceil(size/n_chunks)
 		#Locate the start postition for chunk i
 		fh.seek(i*chunksize)
 		
@@ -218,6 +215,7 @@ def dedupe(seq, qual, stored_read):
 			return (2,consensus)
 
 
+#def processReads(zByteString):
 def processReads(byteString):
 	'''
 	It adds the reads in byteString to the shared dictionary data
@@ -241,7 +239,7 @@ def processReads(byteString):
 	p_data={}
 	
 	private_counter = [0,0,0,0]
-
+	#sprint("v_block received")
 	#Counter contains an array("added", "identical", "extended", "error")
 	if procID == None:
 		print("Counter not initialised. Exiting")
@@ -251,9 +249,13 @@ def processReads(byteString):
 	#print(readsCounter[:])
 	#time.sleep(1)
 	
+	#byteString = zlib.decompress(zByteString)
+	#del zByteString
+	#sprint("v_block decompressed")
+	
 	#Load the byteString into a byteStream to loop over it
 	with io.BytesIO(byteString) as file:
-
+		
 		#Make sure we are at the beginning of the stream.
 		file.seek(0)
 		
@@ -383,7 +385,7 @@ def processReads(byteString):
 	#Ideally no duplicate items must be found and the saving process should be smooth.
 	#In the case there were ducplicates in the source file which ended up in different processes
 	#We will dedupe them and add a single entry into s_data
-	#print("\n", os.getpid(), " - All reads processed. Waiting signal to add them to the shared dictionary")
+	#print("\n", os.getpid(), " - All reads processed.")
 	#print(readsCounter[:])
 	readsCounter[procID + 1] += private_counter[0]
 	readsCounter[procID + 2] += private_counter[1]
@@ -393,7 +395,27 @@ def processReads(byteString):
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 	
-	q_data.put(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),2))
+	def get_size(obj, seen=None):
+		"""Recursively finds size of objects"""
+		size = sys.getsizeof(obj)
+		if seen is None:
+			seen = set()
+		obj_id = id(obj)
+		if obj_id in seen:
+			return 0
+		# Important mark as seen *before* entering recursion to gracefully handle
+		# self-referential objects
+		seen.add(obj_id)
+		if isinstance(obj, dict):
+			size += sum([get_size(v, seen) for v in obj.values()])
+			size += sum([get_size(k, seen) for k in obj.keys()])
+		elif hasattr(obj, '__dict__'):
+			size += get_size(obj.__dict__, seen)
+		elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+			size += sum([get_size(i, seen) for i in obj])
+		return size
+	
+	q_data.put(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
 	#q_data.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
@@ -408,15 +430,18 @@ def processReads(byteString):
 	return True
 
 def init_processReads(readsCounter_, readsCounterLock_, q_data_, q_error_):
+	#print("init_processReads start")
 	global readsCounter, readsCounterLock
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
 	q_data = q_data_
 	q_error = q_error_
+	#print("init_processReads stop")
 
 
 class updateShared:
-	
+	#print("updateshared class")
+	#TODO: transform this into a singleton
 	_updater = None
 	_running = False
 	
@@ -424,16 +449,20 @@ class updateShared:
 	u_error = dict()
 	
 	def start(self):
+		#print("updateshared start")
 		if self._updater:
 			if(self._updater.isAlive() == True):
+				print(threading.currentThread().getName(), " is already running")
 				return
 		self.u_data = dict()
 		self.u_error = dict()
 		self._updater = threading.Thread(target=self._updateShared, name="updateShared")
 		self._updater.setDaemon(True)
 		self._updater.start()
+		#print("updateshared start stop")
 		
 	def stop(self):
+		#print("updateshared stop start")
 		#print("Waiting for the queues to be empty")
 		while not (q_error.empty() and q_data.empty()):
 			#print(int(q_error.qsize() + q_data.qsize()))
@@ -441,23 +470,34 @@ class updateShared:
 		#print("Queues empty")
 		#print("trying to stop")
 		self._running = False
-		self._updater.join()
+		self._updater.join
+		#print("updateshared stop stop")
 
-	def results(self):
-		return (self.u_data, self.u_error)
+	def getData(self):
+		return self.u_data
 		
+	def getErrors(self):
+		return self.u_error
+	
+	def length(self):
+		return (len(self.u_data), len(self.u_error))
+	
+	def size(self):
+		return (sys.getsizeof(self.u_data), sys.getsizeof(self.u_error))
+	
 	def _updateShared(self):
+		#print("_updateshared start")
 		#TODO: Pass the values "properly"
 		self._running = True
 		
 		global s_data, s_error
 		global q_data, q_error
 		
-		print(threading.currentThread().getName(), " Launched")
+		#print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
 					
-			while not q_data.empty():
+			while q_data.empty() == False:
 				#name, read = q_data.get()
 				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
 				#p_data, p_error = pickle.loads(q_data.get())
@@ -495,7 +535,7 @@ class updateShared:
 							readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 							#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 						else:
-							self.u_error.setdefault(name,list()).append(self.u_data[name], read)
+							self.u_error.setdefault(name,list()).extend([self.u_data[name], read])
 							self.u_data.pop(name)
 							readsCounter[(cpus*5) + 3] += 2 #error
 							#print("Added error in self.u_data p_data ", name)
@@ -511,11 +551,8 @@ class updateShared:
 		return
 			
 if __name__ == '__main__':
-
 	#from multiprocessing.process import current_process
 	#current_process()._config["tempdir"] = "/dev/shm"
-
-	print (time.strftime("%c"))
 
 	py = psutil.Process(os.getpid())
 
@@ -544,8 +581,7 @@ if __name__ == '__main__':
 	q_data = multiprocessing.Queue()
 	q_error = multiprocessing.Queue()
 	
-	#lock_manager = manager.Lock()
-	#locked = multiprocessing.RawValue(ctypes.c_bool, False)
+	sprint (time.strftime("%c"))
 	
 	previous_filenames = []
 	for filepath in filepaths:
@@ -615,7 +651,6 @@ if __name__ == '__main__':
 				
 				sprint (time.strftime("%c"))
 				
-				
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
@@ -633,7 +668,6 @@ if __name__ == '__main__':
 					while True:
 						#Read a chunk of length buffersize
 						chunk = file.read(buffersize)
-						
 						#Chunk should be at least an empty byte string b''. Something went wrong if it's None
 						if chunk == None:
 							#print(int(procID+1), " - EOF - flushing")
@@ -642,38 +676,53 @@ if __name__ == '__main__':
 							exit()
 							break
 						#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
-						elif len(chunk) < buffersize:
+						#If there was a previous v_block, this is the last chunk of the file
+						#If it was the last chunk, it will be taken care later in the code
+						elif (len(chunk) < buffersize) and (v_block == None):
 							#If no previous v_block was loaded, this is the first and last chunk and therefore the whole file
-							if v_block == None:
-								
-								#Define the chunk as v_block
-								v_block = chunk
-								
-								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
-								
-								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								sprint( " - File read in one chunk")
-								sprint("% - block ready - ", file.tell(), " sending job: ")
-								
-								break
-								
-							#If there was a previous v_block, this is the last chunk of the file
-							else:
-								
-								#Append the chunk to the existing v_block
-								v_block += chunk 
-								
-								#Send a new process for the v_block
-								multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
-								
-								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								
-								sprint("% - block ready - ", file.tell(), " sending job: ")
-								sprint(" - End of the file")
-								
-								break
-								
+							#Define the chunk as v_block
+							v_block = chunk
+							
+							#size=sys.getsizeof(v_block)
+							#sprint("Size u: ", size)
+							#results_z = zlib.compress(v_block,1)
+							#sprint("Size c: ", sys.getsizeof(results_z))
+							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
+							
+							
+							#sprint("sending job")
+							#Send a new process for the v_block
+							multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
+							
+							sprint("block ready - ", file.tell())
+							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+							
+							sprint( " - File read in one chunk")
+							break
+						
+						#If chunk length is 0 we have reached the end of the file
+						elif len(chunk) == 0:
+							sprint("EOF reached")
+							#print(len(chunk))
+							#print(len(v_block))
+							
+							#size=sys.getsizeof(v_block)
+							#sprint("Size u: ", size)
+							#results_z = zlib.compress(v_block,1)
+							#sprint("Size c: ", sys.getsizeof(results_z))
+							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
+							
+							
+							#sprint("sending job")
+							#Send a new process for the v_block
+							multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
+							
+							sprint("block ready - ", file.tell())
+							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+										
+							sprint(" - End of the file")
+							break
+						
 						#If the pointer position equals buffersize, we are in the first chunk of a longer file
 						elif file.tell() == buffersize:
 							#TODO: At this point, v_block should be None. We should assert for this to be sure.
@@ -726,7 +775,6 @@ if __name__ == '__main__':
 									
 									#Append the chunk to the existing v_block
 									v_block += chunk
-									
 									break
 								
 								#If a seed was found, we need to find the boundaries of the read where the seed is
@@ -756,16 +804,23 @@ if __name__ == '__main__':
 										
 										#Append the chunk until the newblock position to the existing v_block
 										v_block += chunk[:newblock]
+										#size=sys.getsizeof(v_block)
+										#sprint("Size u: ", size)
+										#results_z = zlib.compress(v_block,1)
+										#sprint("Size c: ", sys.getsizeof(results_z))
+										#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
 										
+										
+										#sprint("sending job")
 										#Send a new process for the v_block
 										multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
 										
-										sprint("% - block ready - ", file.tell(), " sending job: ")
+										sprint("block ready - ", file.tell())
 										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
 										
 										#Define the rest of the chunk as the new v_block
 										v_block = chunk[newblock:]
-										
+
 										break
 							#print("inner wall exit")
 					sprint("100%")
@@ -793,14 +848,14 @@ if __name__ == '__main__':
 					sprint("Joining pool")
 					pool.join()
 					#print("outer wall exit")
-					sprint(readsCounter[:])
+					#sprint(readsCounter[:])
 					updater.stop()
 					counterActive.value = False
 					sprint("Updating the shared dictionary")
-					sprint("Length: ", len(updater.u_data))
-					s_data.update(updater.u_data)
+					sprint("Length: ", len(updater.length()))
+					s_data.update(updater.getData())
 					
-					for Ename in updater.u_error:
+					for Ename in updater.getErrors():
 						#1. Check whether the entry exists already in the dictioniary
 						#2. If it doesn't exist define a dictionary for it
 						if Ename not in s_error:
