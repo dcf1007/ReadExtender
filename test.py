@@ -266,7 +266,7 @@ def processReads(chunk, minoverlap=25):
 	global s_data
 	global s_error
 	procID = None
-	chunk_index = -1
+	
 	file = None
 	with readsCounterLock:
 		while procID == None:
@@ -294,10 +294,10 @@ def processReads(chunk, minoverlap=25):
 	#sprint("v_block decompressed")
 	
 	#Load the byteString into a byteStream to loop over it
-	with io.BytesIO(FASTQ_chunks[chunk]) as file:
+	with io.BytesIO(chunk) as file:
 		#Erase the chunk to release mempory
-		chunk_length = len(FASTQ_chunks[chunk])
-		FASTQ_chunks[chunk] = b''
+		chunk_length = len(chunk)
+		del chunk
 		sprint("Releasing memory: ProcessReads", end="\r")
 		gc.collect()
 		sprint("Done: ProcessReads", end="\r")
@@ -458,13 +458,12 @@ def processReads(chunk, minoverlap=25):
 	
 	return True
 
-def init_processReads(FASTQ_chunks_, readsCounter_, readsCounterLock_, q_data_):
+def init_processReads(readsCounter_, readsCounterLock_, q_data_):
 	#print("init_processReads start")
 	global readsCounter, readsCounterLock, FASTQ_chunks, q_data
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
 	q_data = q_data_
-	FASTQ_chunks = FASTQ_chunks_
 	#print("init_processReads stop") 
 
 
@@ -494,7 +493,7 @@ class updateShared:
 		#print("updateshared stop start")
 		sprint("Waiting for the queues to be empty")
 		while q_data.empty() == False:
-			sprint("Empty: ", q_data.empty(), " Size: ", q_error.qsize(), end="\r")
+			sprint("Empty: ", q_data.empty(), " Size: ", end="\r")
 			time.sleep(0.1)
 		#print("Queues empty")
 		#print("trying to stop")
@@ -659,7 +658,9 @@ def decompressChunks(filepath, buffersize):
 				while True:
 					sprint("Start while 1", end="\r")
 					if offset_0 == 0 and offset >= f_size:
-						chunks.append(peek_buffer + file.read())
+						content.write(peek_buffer)
+						content.write(file.read())
+						chunks.append(content.getvalue())
 						content.close()
 						file.close()
 						gzfile.close()
@@ -752,7 +753,7 @@ def decompressChunks(filepath, buffersize):
 							sprint("Done: DecompressChunks", end="\r")
 							sprint("chunks: ", len(chunks))
 							return chunks
-	return
+	return False
 			
 if __name__ == '__main__':
 	#from multiprocessing.process import current_process
@@ -800,16 +801,15 @@ if __name__ == '__main__':
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
 		sprint("Processing file: ", filename)
-		FASTQ_chunks = multiprocessing.Array(ctypes.c_char_p, decompressChunks(filepath, buffersize))
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
-		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(FASTQ_chunks, readsCounter, readsCounterLock, q_data)) as pool:
+		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, q_data)) as pool:
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
 			
 			sprint("RAM: ", humanbytes(py.memory_info().rss))
-			for chunk in range(len(FASTQ_chunks)):
+			for chunk in decompressChunks(filepath, buffersize):
 				#sprint("Sending job ", len(multiple_results)+1)
 				#Send a new process for the chunk
 				#sprint(chunk)
@@ -822,8 +822,11 @@ if __name__ == '__main__':
 			sprint(len(multiple_results), " jobs succesfully sent")
 			#print("Closing pool")
 			pool.close()
-
+			sprint("Releasing memory: Main thread", end="\r")
+			gc.collect()
+			sprint("Done: Main thread", end="\r")
 			sprint("Waiting for results to be ready")
+			
 			pFinished = [0]*len(multiple_results)
 			sprint(sum(pFinished), "/", len(pFinished), end="\r")
 			
@@ -843,7 +846,7 @@ if __name__ == '__main__':
 			
 			#sprint(readsCounter[:])
 			del multiple_results
-		FASTQ_chunks = None
+		
 		sprint("Releasing memory: Main thread", end="\r")
 		gc.collect()
 		sprint("Done: Main thread", end="\r")
