@@ -23,6 +23,19 @@ import threading
 import csv
 import re
 
+def  humanbytes(size, unit = True):
+	#2**10 = 1024
+	power = 2**10
+	n = 0
+	Dic_powerN = {0 : 'bytes', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
+	while size > power:
+		size /=  power
+		n += 1
+	if unit == True:
+		return str(round(size,1)) + " " + Dic_powerN[n]
+	else:
+		return str(round(size,1))
+
 def get_size(obj, seen=None):
 	"""Recursively finds size of objects"""
 	size = sys.getsizeof(obj)
@@ -116,6 +129,9 @@ def gzCompress(slice_i, slice_f):
 			for index in range(slice_i, slice_f):
 				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
 			gzfile.close()
+		sprint("Releasing memory: gzCompress")
+		gc.collect()
+		sprint("Done: gzCompress")
 		return gzfileStream.getvalue()
 
 def init_gzCompress(s_data_keys_):
@@ -123,7 +139,7 @@ def init_gzCompress(s_data_keys_):
 	s_data_keys = s_data_keys_
 
 
-def best_overlap(read1,qual1,read2,qual2):
+def best_overlap(read1,qual1,read2,qual2, minoverlap=25):
 	'''
 	Finds the longest perfect overlap between two reads
 	Read1
@@ -140,7 +156,7 @@ def best_overlap(read1,qual1,read2,qual2):
 	#Loop through al the possible subStrings of Read1 that could be the
 	#overlap in Read 2
 	#Offset always contains the position of the first byte of the query
-	for r1_offset in range(len(read1)):
+	for r1_offset in range(len(read1)-minoverlap):
 		#OBS!: r1_query = read1[r1_offset:]
 		
 		#Check if the subString of Read1 is the beginning of Read2
@@ -170,28 +186,7 @@ def best_overlap(read1,qual1,read2,qual2):
 				#print(read1.ljust(len(consensus[0]),b"-"))
 				#print(read2.rjust(len(consensus[0]),b"-"))
 				return consensus
-				
 	return consensus
-
-def splitFile(sourceFile, i, n_chunks):
-	'''
-	Chunks sourceFile in n_chunks and returns chunk i.
-	Only the chunk of interest is saved in memory.
-	Returns a tuple (startByte, byteString) where startByte is the
-	first byte of the chunk relative to the full-sized file and
-	byteString contains a chunk of sourceFile from startByte.
-	'''
-	#Open the file as read-only and byte mode
-	with open(sourceFile, "rb") as fh:
-		#Obtain the size of the file
-		size=os.fstat(fh.fileno()).st_size
-		#Calculate the size of the chunks
-		chunksize=math.ceil(size/n_chunks)
-		#Locate the start postition for chunk i
-		fh.seek(i*chunksize)
-		
-		assert i*chunksize == fh.tell(), "The pointer in the file and the start of the chunk relative to sourceFile differ. They should be equal"
-		return (i*chunksize, fh.read(chunksize))
 
 def safe_readline(byteStream):
 	'''
@@ -212,7 +207,7 @@ def safe_readline(byteStream):
 
 
 
-def dedupe(seq, qual, stored_read):
+def dedupe(seq, qual, stored_read, minoverlap=25):
 	#Check if reads are identical. Omit if so.
 	if seq == stored_read[0]:
 		#print("identical",)
@@ -238,7 +233,7 @@ def dedupe(seq, qual, stored_read):
 		#----------------
 		#          ---------------
 		#                    read2
-		consensus = best_overlap(seq,qual,stored_read[0],stored_read[1])
+		consensus = best_overlap(seq,qual, stored_read[0], stored_read[1], minoverlap)
 		
 		#Check if overlap was not found
 		if consensus == -1:
@@ -247,7 +242,7 @@ def dedupe(seq, qual, stored_read):
 			#----------------
 			#          ---------------
 			#                    read1
-			consensus=best_overlap(stored_read[0],stored_read[1],seq,qual)
+			consensus = best_overlap(stored_read[0], stored_read[1], seq, qual, minoverlap)
 		
 		#Check if overlap was not found
 		if consensus == -1:
@@ -257,11 +252,11 @@ def dedupe(seq, qual, stored_read):
 		else:
 			#Add consensus (contains SEQ and QUAL) to data dict
 			#print("consensus found",)
-			return (2,consensus)
+			return (2, consensus)
 
 
 #def processReads(zByteString):
-def processReads(chunk):
+def processReads(chunk, minoverlap=25):
 	'''
 	It adds the reads in byteString to the shared dictionary data
 	if they are correct/extended/overlapped or to the error
@@ -303,6 +298,9 @@ def processReads(chunk):
 		#Erase the chunk to release mempory
 		chunk_length = len(FASTQ_chunks[chunk])
 		FASTQ_chunks[chunk] = b''
+		sprint("Releasing memory: ProcessReads")
+		gc.collect()
+		sprint("Done: ProcessReads")
 		#Make sure we are at the beginning of the stream.
 		file.seek(0)
 		
@@ -372,7 +370,7 @@ def processReads(chunk):
 				#Check if the read name is in p_data dictionary.
 				if p_read:
 					#print("DEDUPE private")
-					deduped = dedupe(seq, qual, p_read)
+					deduped = dedupe(seq, qual, p_read, minoverlap)
 					if deduped:
 						#Only rewrite the read if it has been extended. If identical, do nothing.
 						if(deduped[0] == 2):
@@ -385,7 +383,8 @@ def processReads(chunk):
 						p_error[name]=[(seq,qual), p_read]
 						p_data.pop(name)
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
-						#print("Added error in dedupe private ", name)
+						#sprint("Added error in dedupe private")
+						print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
 						private_counter[3] += 2 #error
 						private_counter[0] -= 1 #error
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
@@ -393,7 +392,7 @@ def processReads(chunk):
 				#If not in p_data, check if it's in s_data.
 					if s_read:
 						#print("DEDUPE shared")
-						deduped = dedupe(seq, qual, s_read)
+						deduped = dedupe(seq, qual, s_read, minoverlap)
 						if deduped:
 							#Only store the read if it has been extended. In this case, the shared item will be erased.
 							#If identical, leave the shared copy and add nothing to p_data.
@@ -409,7 +408,8 @@ def processReads(chunk):
 							p_error[name]=[(seq,qual)]
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							private_counter[3] += 1 #error
-							#print("Added error in dedupe shared ", name)
+							#sprint("Added error in dedupe shared")
+							print("\n>", name.decode("UTF-8"), "\n", s_read[0].decode("UTF-8"), "\n>", name.decode("UTF-8"), "\n", seq.decode("UTF-8"), file=sys.stderr)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							#pass
 					else:
@@ -426,6 +426,7 @@ def processReads(chunk):
 			#pass
 		del p_read
 		del s_read
+		#gc.collect(0)
 	#print("leaving function")
 	#Save in the shared dictionary, for which we have to lock it.
 	#Ideally no duplicate items must be found and the saving process should be smooth.
@@ -450,6 +451,9 @@ def processReads(chunk):
 	with readsCounterLock:
 		readsCounter[procID] = 0
 	
+	sprint("Releasing memory: Processreads")
+	gc.collect()
+	sprint("Done: Processreads")
 	#print(procID, " Finished")
 	
 	return True
@@ -496,6 +500,9 @@ class updateShared:
 		#print("trying to stop")
 		self._running = False
 		self._updater.join()
+		sprint("Releasing memory: Updater")
+		gc.collect()
+		sprint("Done: Updater")
 		sprint("Updater stopped")
 
 	def getData(self):
@@ -522,6 +529,7 @@ class updateShared:
 		while self._running == True:
 			sprint("U_files left: ", q_data.qsize(), end="\r")
 			while q_data.empty() == False:
+				sprint("U_files left: ", q_data.qsize(), end="\r")
 				#name, read = q_data.get()
 				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
 				#p_data, p_error = pickle.loads(q_data.get())
@@ -529,7 +537,7 @@ class updateShared:
 				for e_name, e_reads in p_error.items():
 					#0 Add e_name to self.u_error
 					self.u_error.setdefault(e_name,list()).extend(e_reads)
-					readsCounter[(cpus*5) + 3] += 1 #error
+					#readsCounter[(cpus*5) + 3] += 1 #error
 					
 					#1 If a e_name is in self.u_data, transfer it to self.u_error.
 					if e_name in self.u_data:
@@ -537,7 +545,9 @@ class updateShared:
 						self.u_data.pop(e_name)
 						readsCounter[(cpus*5) + 3] += 1 #error
 						readsCounter[(cpus*5)] -= 1 #Substract the read from added
-						#print("Added error in e_name self.u_data ", e_name)
+						#sprint("Added error in e_name self.u_data  \n>")
+						#for read in self.u_error[e_name]:
+						#	sprint(">", e_name, "\n", read[0])
 				
 				for name, read in p_data.items():
 					#2. If name is in self.u_error, transfer read to self.u_error
@@ -545,13 +555,15 @@ class updateShared:
 						self.u_error[name].append(read)
 						readsCounter[(cpus*5) + 3] += 1 #error
 						readsCounter[(cpus*5)] -= 1 #Substract the read from added
-						#print("Added error in self.u_error name ", name)
+						#sprint("Added error in self.u_error name   \n>")
+						#for read in self.u_error[name]:
+						#	sprint(">", name, "\n", read[0])
 						
 					#At this stage, names in self.u_data are guaranteed not to be in  self.u_error
 					#3. Dedupe whatever is in self.u_data and update the read value
 					elif name in self.u_data:
 						#sprint("Found duplicate: ", name)
-						deduped = dedupe(read[0], read[1], self.u_data[name])
+						deduped = dedupe(read[0], read[1], self.u_data[name], minoverlap)
 						if deduped:
 							#Only rewrite the read if it has been extended.
 							if(deduped[0] == 2):
@@ -562,14 +574,20 @@ class updateShared:
 							self.u_error.setdefault(name,list()).extend([self.u_data[name], read])
 							self.u_data.pop(name)
 							readsCounter[(cpus*5) + 3] += 2 #error
-							#print("Added error in self.u_data p_data ", name)
+							#sprint("Added error in self.u_data:")
+							for read in self.u_error[name]:
+								print("\n>", name.decode("UTF-8"), "\n", read[0].decode("UTF-8"), file=sys.stderr)
 						readsCounter[(cpus*5)] -= 1 #or is 2? #Substract the read from added as it has been added to either identical, extended or error
 					else:
 						#print(name, read)
 						self.u_data[name] = read
-			#print("empty")
+				#print("empty")
+				sprint("Releasing memory: Updater")
+				gc.collect()
+				sprint("Done: Updater")
+				sprint("U_files left: ", q_data.qsize(), end="\r")
+			sprint("U_files left: ", q_data.qsize(), end="\r")
 			time.sleep(1)
-		
 		#print(threading.currentThread().getName(), " Leaving")
 		return
 
@@ -609,7 +627,7 @@ def decompressChunks(filepath):
 		gz_size = gzfile.seek(0, 2)
 		gzfile.seek(0)
 		
-		sprint("Compressed file size: ", round(gz_size/(1024*1024)), " MB")
+		sprint("Compressed file size: ", humanbytes(gz_size))
 
 		with gzip.open(gzfile, 'rb') as file:
 		
@@ -623,14 +641,14 @@ def decompressChunks(filepath):
 			gzfile.seek(0)
 			
 			sprint("Estimated compression ratio:", round(gz_ratio, 2))
-			sprint("Approx. decompressed file size: ", round(f_size/(1024*1024)), " MB")
+			sprint("Approx. decompressed file size: ", humanbytes(f_size))
 			
 			if (f_size/cpus) > 3*1024*1024*1024:
 				buffersize = 3*1024*1204*1024
 			else:
 				buffersize = math.ceil(f_size/cpus)
 				
-			sprint("Using chunk size of: ", round(buffersize/(1024*1024)), " MB")
+			sprint("Using chunk size of: ", humanbytes(buffersize))
 			
 			sprint("Decompressing and generating chunks")
 			
@@ -641,92 +659,99 @@ def decompressChunks(filepath):
 			peek_buffer = b''
 			with io.BytesIO() as content:
 				while True:
-					sprint("Start while 1")
+					sprint("Start while 1", end="\r")
 					if offset_0 == 0 and offset >= f_size:
 						chunks.append(peek_buffer + file.read())
 						content.close()
 						file.close()
 						gzfile.close()
+						sprint("Releasing memory: DecompressChunks")
+						gc.collect()
+						sprint("Done: DecompressChunks")
 						sprint("File read in one chunk")
 						return chunks
 					else:
-						sprint(" + Erasing content")
+						sprint(" + Erasing content", end="\r")
 						content.seek(0)
 						content.truncate()
-						sprint(" + Emptying peek in content")
-						sprint(" + old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
-						sprint(" + old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						sprint(" + Emptying peek in content", end="\r")
+						sprint(" + old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
+						sprint(" + old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
 						content.write(peek_buffer[:buffersize])
-						sprint(" + new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						sprint(" + new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
 						peek_buffer = peek_buffer[buffersize:]
-						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
-						sprint(" + offset_0: ", offset_0, " offset: ", offset)
-						sprint(" + old tell: ", file.tell(), "/", f_size)
-						sprint(" + Reading ", (offset - offset_0) - content.tell())
+						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
+						sprint(" + offset_0: ", offset_0, " offset: ", offset, end="\r")
+						sprint(" + old tell: ", file.tell(), "/", f_size, end="\r")
+						#sprint(" + Reading ", (offset - offset_0) - content.tell(), end="\r")
+						sprint(" + Reading ", humanbytes(offset_0), " to ", humanbytes(offset), " / ", humanbytes(f_size), end="\r")
 						content.write(file.read((offset - offset_0) - content.tell()))
-						sprint(" + new tell: ", file.tell(), "/", f_size)
-						sprint(" + new content2: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						sprint(" + new tell: ", file.tell(), "/", f_size, end="\r")
+						sprint(" + new content2: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
 						peek_buffer += file.read(peek_size - len(peek_buffer))
-						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
-						sprint(" + new tell2: ", file.tell(), "/", f_size)
+						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
+						sprint(" + new tell2: ", file.tell(), "/", f_size, end="\r")
 						seed = peek_buffer.find(b'\n+')+1
-						sprint(" + new seed: ", seed)
+						sprint(" + new seed: ", seed, end="\r")
 						while f_size > file.tell() and len(peek_buffer) > 0:
-							sprint(" + Start while2")
+							sprint(" + Start while2", end="\r")
 							if seed == 0:
-								sprint(" + - seed 0")
-								sprint(" + - - old tell: ", file.tell(), "/", f_size)
-								sprint(" + - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+								sprint(" + - seed 0", end="\r")
+								sprint(" + - - old tell: ", file.tell(), "/", f_size, end="\r")
+								sprint(" + - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
 								peek_buffer += file.read(peek_size)
-								sprint(" + - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
-								sprint(" + - - new tell: ", file.tell(), "/", f_size)
+								sprint(" + - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
+								sprint(" + - - new tell: ", file.tell(), "/", f_size, end="\r")
 								seed = peek_buffer.find(b'\n+')+1
-								sprint(" + - - new seed: ", seed)
+								sprint(" + - - new seed: ", seed, end="\r")
 							else:
-								sprint(" + - seed found: ", seed)
+								sprint(" + - seed found: ", seed, end="\r")
 								newblock = peek_buffer[:seed].rfind(b'\n@')+1
-								sprint(" + - - new block: ", newblock)
+								sprint(" + - - new block: ", newblock, end="\r")
 								if newblock == 0:
-									sprint(" + - - newblock 0")
-									sprint(" + - - - old offset: ", offset)
+									sprint(" + - - newblock 0", end="\r")
+									sprint(" + - - - old offset: ", offset, end="\r")
 									offset += seed
-									sprint(" + - - - new offset: ", offset)
-									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									sprint(" + - - - new offset: ", offset, end="\r")
+									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
 									content.write(peek_buffer[:seed])
-									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
-									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
+									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
 									peek_buffer = peek_buffer[seed:]
-									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
 									seed = peek_buffer.find(b'\n+')+1
-									sprint(" + - - new seed: ", seed)
+									sprint(" + - - new seed: ", seed, end="\r")
 								else:
-									sprint(" + - - newblock found: ", newblock)
-									sprint(" + - - - old offset: ", offset)
+									sprint(" + - - newblock found: ", newblock, end="\r")
+									sprint(" + - - - old offset: ", offset, end="\r")
 									offset += newblock
-									sprint(" + - - - new offset: ", offset)
-									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									sprint(" + - - - new offset: ", offset, end="\r")
+									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
 									content.write(peek_buffer[:newblock])
-									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
-									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:], end="\r")
+									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
 									peek_buffer = peek_buffer[newblock:]
-									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:], end="\r")
 									chunks.append(content.getvalue())
-									sprint(" + - - - chunks: ", len(chunks))
-									sprint(" + - - - old offset_0: ", offset_0)
+									sprint(" + - - - chunks: ", len(chunks), end="\r")
+									sprint(" + - - - old offset_0: ", offset_0, end="\r")
 									offset_0 = offset
-									sprint(" + - - - new offset_0: ", offset_0)
-									sprint(" + - - - old offset: ", offset)
+									sprint(" + - - - new offset_0: ", offset_0, end="\r")
+									sprint(" + - - - old offset: ", offset, end="\r")
 									offset = offset_0 + buffersize
-									sprint(" + - - - new offset: ", offset)
+									sprint(" + - - - new offset: ", offset, end="\r")
 									break
 						else:
-							sprint("EOF reached")
+							sprint("EOF reached", end="\r")
 							content.write(peek_buffer)
 							content.write(file.read())
 							chunks.append(content.getvalue())
 							content.close()
 							file.close()
 							gzfile.close()
+							sprint("Releasing memory: DecompressChunks")
+							gc.collect()
+							sprint("Done: DecompressChunks")
 							sprint("chunks: ", len(chunks))
 							return chunks
 	return
@@ -740,12 +765,14 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Dedupe.')
 	parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
 	parser.add_argument('--output','-o', type=str, help='output filename')
+	parser.add_argument('--minoverlap','-m', type=int, default=int(25), help='minimum overlap (default: 25)')
 	parser.add_argument('filepaths', nargs='+', help='files to process')
 
 	args = parser.parse_args()
 	cpus = args.threads
+	minoverlap = args.minoverlap
 	filepaths = args.filepaths
-
+	
 	messages = multiprocessing.Queue()
 	
 	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
@@ -780,14 +807,14 @@ if __name__ == '__main__':
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
 			
-			sprint("RAM: ", py.memory_info().rss)
+			sprint("RAM: ", humanbytes(py.memory_info().rss))
 			for chunk in range(len(FASTQ_chunks)):
 				#sprint("Sending job ", len(multiple_results)+1)
 				#Send a new process for the chunk
 				#sprint(chunk)
 				#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
 				#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
-				multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
+				multiple_results.append(pool.apply_async(processReads,args=(chunk, minoverlap)))
 				if counterActive.value == False:
 					counterActive.value = True
 					updater.start()
@@ -796,7 +823,6 @@ if __name__ == '__main__':
 			pool.close()
 
 			sprint("Waiting for results to be ready")
-			
 			pFinished = [0]*len(multiple_results)
 			sprint(sum(pFinished), "/", len(pFinished), end="\r")
 			
@@ -816,8 +842,10 @@ if __name__ == '__main__':
 			
 			#sprint(readsCounter[:])
 			del multiple_results
-			FASTQ_chunks = None
-		
+		FASTQ_chunks = None
+		sprint("Releasing memory: Main thread")
+		gc.collect()
+		sprint("Done: Main thread")
 		updater.stop()
 		counterActive.value = False
 		
@@ -849,7 +877,7 @@ if __name__ == '__main__':
 				for Eread in Ereads:
 					deduped = None
 					for s_Eread in s_error[Ename].keys():
-						deduped = dedupe(Eread[0], Eread[1], s_Eread)
+						deduped = dedupe(Eread[0], Eread[1], s_Eread, minoverlap)
 						if deduped:
 							#If Eread is either identical or contained in s_Eread
 							if(deduped[0] == 1):
@@ -877,7 +905,10 @@ if __name__ == '__main__':
 		sprint("Shared dictionaries updated")
 		sprint("File processed succesfully")
 		previous_filenames.add(filename)
-	
+		sprint("Releasing memory: Main thread")
+		gc.collect()
+		sprint("Done: Main thread")
+		
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
 	
@@ -915,10 +946,13 @@ if __name__ == '__main__':
 			fh.close()
 			#sprint(readsCounter[:])
 		del multiple_results
-	s_data_keys.clear()
+	s_data_keys = None
 	s_data.clear()
 	del s_data_keys
 	del s_data
+	sprint("Releasing memory: Main thread")
+	gc.collect()
+	sprint("Done: Main thread")
 	
 	sprint("Generating error table")
 	output = pathlib.Path(args.output)
@@ -947,14 +981,13 @@ if __name__ == '__main__':
 			for Eread, Efiles in Ereads.items():
 				for Efile in Efiles:
 					error_files[Efile].write(Ename+b"\n"+Eread[0]+b"\n+\n"+Eread[1]+b"\n")
-	
 	del s_error	
 	
 	for filename in error_files:
 		error_files[filename].close()
 	
 	sprint (time.strftime("%c"))
-	sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
-	gc.disable()
+	sprint("RAM: ", humanbytes(py.memory_info().rss))
+	
 
 
