@@ -401,8 +401,9 @@ def processReads(byteString):
 	readsCounter[procID + 3] += private_counter[2]
 	readsCounter[procID + 4] += private_counter[3]
 	
-		#print(readsCounter[:])
-	results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
+	#print(readsCounter[:])
+	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
+	results = pickle.dumps((p_data, p_error), protocol=4)
 	
 	del p_data
 	del p_error
@@ -431,15 +432,15 @@ def gzip_nochunks_byte_u3():
 		filename = pathlib.Path(filepath).name
 		print("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
-			with multiprocessing.Pool(cpus+1) as gzfile_pool:
+			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
 					print("sending job: ", i, end="\r")
-					multiple_results.append(gzfile_pool.apply_async(getChunk,args=(filepath,i,cpus)))
+					multiple_results.append(pool.apply_async(getChunk,args=(filepath,i,cpus)))
 					#pool.apply_async(getChunk,args=(filepath,my_shared_list,i,cpus))
 				print("")
 				#print("Closing pool")
-				gzfile_pool.close()
+				pool.close()
 				while True:
 					pFinished=0
 					for res in multiple_results:
@@ -449,7 +450,7 @@ def gzip_nochunks_byte_u3():
 						print("Loaded")
 						break
 				#print("Joining pool")
-				gzfile_pool.join()
+				pool.join()
 				print("Merging file")
 				for result in multiple_results:
 					chunk=result.get()
@@ -648,6 +649,8 @@ def gzip_nochunks_byte_u3():
 					sprint("100%")
 					del v_block
 					del chunk
+					file.close()
+					gzfile.close()
 					
 					#print("Closing pool")
 					pool.close()
@@ -658,7 +661,8 @@ def gzip_nochunks_byte_u3():
 					while True:
 						for index, res in enumerate(multiple_results):
 							if((res.ready()==True) and (pFinished[index] == 0)):
-								p_data, p_error = pickle.loads(zlib.decompress(res.get()))
+								#p_data, p_error = pickle.loads(zlib.decompress(res.get()))
+								p_data, p_error = pickle.loads(res.get())
 								#TODO: The saving code goes in here
 								#0a. If a read is in p_data and u_error, transfer it to p_error
 								duplicate_Enames = u_error.keys() & p_data.keys()
