@@ -33,32 +33,45 @@ def sprint(*args, end="\r\n"):
 
 def count(cpus, messages):
 	global readsCounter
-
-	start_time = time.time()
-	if(cpus > 1):
-		start_reads = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
-	else:
-		start_reads = sum(readsCounter[:]) - readsCounter[0]
-
+	global counterActive
+	
 	while True:
-		if(cpus > 1):
-			reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
-			reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
-			reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
-			reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
-			reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
-		else:
-			reads_added = readsCounter[1]
-			reads_identical = readsCounter[2]
-			reads_extended = readsCounter[3]
-			reads_error = readsCounter[4]
-			reads_total = sum(readsCounter[:]) - readsCounter[0]
-		if not messages.empty():
-			while not messages.empty():
-				print(messages.get(), end="")
-		print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
+		
+		if counterActive.value == True:
+			
+			start_time = time.time()
+			
+			if(cpus > 1):
+				start_reads = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
+			else:
+				start_reads = sum(readsCounter[:]) - readsCounter[0]
+
+			while counterActive.value == True:
+				if(cpus > 1):
+					reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
+					reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
+					reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
+					reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
+					reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
+				else:
+					reads_added = readsCounter[1]
+					reads_identical = readsCounter[2]
+					reads_extended = readsCounter[3]
+					reads_error = readsCounter[4]
+					reads_total = sum(readsCounter[:]) - readsCounter[0]
+
+				while not messages.empty():
+					print(messages.get(), end="")
+				
+				print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s              ", end="\r")
+				
+				time.sleep(0.1)
+		
+		while not messages.empty():
+			print(messages.get(), end="")
+			
 		time.sleep(0.1)
-	return True
+	return
 
 def gzCompress(nameList):
 	global s_data
@@ -274,13 +287,13 @@ def processReads(byteString):
 			if name in p_error:
 				p_error[name].append((seq,qual))
 				private_counter[3] += 1 #error
-				print("Added error in initial p_error ", name)
+				#print("Added error in initial p_error ", name)
 			elif name in s_error:
 				#We do not append the errors to s_error directly because we identify in which file they were found once the results are returned
 				#p_error[name] = s_error[name]
 				p_error[name] = [(seq,qual)]
 				private_counter[3] += 1 #error
-				print("Added error in initial s_error ", name)
+				#print("Added error in initial s_error ", name)
 				
 			#Check if SEQ and QUAL have different lengths
 			elif (len(seq) != len(qual)):
@@ -324,7 +337,7 @@ def processReads(byteString):
 						p_error[name]=[(seq,qual), p_read]
 						p_data.pop(name)
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
-						print("Added error in dedupe private ", name)
+						#print("Added error in dedupe private ", name)
 						private_counter[3] += 2 #error
 						private_counter[0] -= 1 #error
 						#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
@@ -348,7 +361,7 @@ def processReads(byteString):
 							p_error[name]=[(seq,qual)]
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							private_counter[3] += 1 #error
-							print("Added error in dedupe shared ", name)
+							#print("Added error in dedupe shared ", name)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", readsCounter[:])
 							#pass
 					else:
@@ -380,11 +393,8 @@ def processReads(byteString):
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 	
-	for dict_item in p_data.items():
-		q_data.put(dict_item)
-	
-	for dict_item in p_error.items():
-		q_error.put(dict_item)
+	q_data.put(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),2))
+	#q_data.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
 	del p_error
@@ -393,7 +403,7 @@ def processReads(byteString):
 	with readsCounterLock:
 		readsCounter[procID] = 0
 	
-	print(procID, " Finished")
+	#print(procID, " Finished")
 	
 	return True
 
@@ -424,12 +434,12 @@ class updateShared:
 		self._updater.start()
 		
 	def stop(self):
-		print("Waiting for the queues to be empty")
+		#print("Waiting for the queues to be empty")
 		while not (q_error.empty() and q_data.empty()):
-			print(int(q_error.qsize() + q_data.qsize()))
+			#print(int(q_error.qsize() + q_data.qsize()))
 			time.sleep(0.1)
-		print("Queues empty")
-		print("trying to stop")
+		#print("Queues empty")
+		#print("trying to stop")
 		self._running = False
 		self._updater.join()
 
@@ -446,57 +456,59 @@ class updateShared:
 		print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
-			
-			while not q_error.empty():
-				e_name, e_reads = q_error.get()
-				
-				#0 Add e_name to self.u_error
-				self.u_error.setdefault(e_name,list()).extend(e_reads)
-				readsCounter[(cpus*5) + 3] += 1 #error
-				
-				#1 If a e_name is in self.u_data, transfer it to self.u_error.
-				if e_name in self.u_data:
-					self.u_error[e_name].append(self.u_data[e_name])
-					self.u_data.pop(e_name)
-					readsCounter[(cpus*5) + 3] += 1 #error
-					readsCounter[(cpus*5)] -= 1 #Substract the read from added
-					print("Added error in e_name self.u_data ", e_name)
 					
 			while not q_data.empty():
-				name, read = q_data.get()
-
-				#2. If name is in self.u_error, transfer read to self.u_error
-				if name in self.u_error:
-					self.u_error[name].append(read)
+				#name, read = q_data.get()
+				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
+				#p_data, p_error = pickle.loads(q_data.get())
+				
+				for e_name, e_reads in p_error.items():
+					#0 Add e_name to self.u_error
+					self.u_error.setdefault(e_name,list()).extend(e_reads)
 					readsCounter[(cpus*5) + 3] += 1 #error
-					readsCounter[(cpus*5)] -= 1 #Substract the read from added
-					print("Added error in self.u_error name ", name)
 					
-				#At this stage, names in self.u_data are guaranteed not to be in  self.u_error
-				#3. Dedupe whatever is in self.u_data and update the read value
-				elif name in self.u_data:
-					sprint("Found duplicate: ", name)
-					deduped = dedupe(read[0], read[1], self.u_data[name])
-					if deduped:
-						#Only rewrite the read if it has been extended.
-						if(deduped[0] == 2):
-							p_data[name]=deduped[1]
-						readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
-						#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+					#1 If a e_name is in self.u_data, transfer it to self.u_error.
+					if e_name in self.u_data:
+						self.u_error[e_name].append(self.u_data[e_name])
+						self.u_data.pop(e_name)
+						readsCounter[(cpus*5) + 3] += 1 #error
+						readsCounter[(cpus*5)] -= 1 #Substract the read from added
+						#print("Added error in e_name self.u_data ", e_name)
+				
+				for name, read in p_data.items():
+					#2. If name is in self.u_error, transfer read to self.u_error
+					if name in self.u_error:
+						self.u_error[name].append(read)
+						readsCounter[(cpus*5) + 3] += 1 #error
+						readsCounter[(cpus*5)] -= 1 #Substract the read from added
+						#print("Added error in self.u_error name ", name)
+						
+					#At this stage, names in self.u_data are guaranteed not to be in  self.u_error
+					#3. Dedupe whatever is in self.u_data and update the read value
+					elif name in self.u_data:
+						#sprint("Found duplicate: ", name)
+						deduped = dedupe(read[0], read[1], self.u_data[name])
+						if deduped:
+							#Only rewrite the read if it has been extended.
+							if(deduped[0] == 2):
+								p_data[name]=deduped[1]
+							readsCounter[(cpus*5) + deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+							#private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+						else:
+							self.u_error.setdefault(name,list()).append(self.u_data[name], read)
+							self.u_data.pop(name)
+							readsCounter[(cpus*5) + 3] += 2 #error
+							#print("Added error in self.u_data p_data ", name)
+						readsCounter[(cpus*5)] -= 1 #or is 2? #Substract the read from added as it has been added to either identical, extended or error
 					else:
-						self.u_error.setdefault(name,list()).append(self.u_data[name], read)
-						self.u_data.pop(name)
-						readsCounter[(cpus*5) + 3] += 2 #error
-						print("Added error in self.u_data p_data ", name)
-					readsCounter[(cpus*5)] -= 1 #or is 2? #Substract the read from added as it has been added to either identical, extended or error
-				else:
-					self.u_data[name] = read
+						#print(name, read)
+						self.u_data[name] = read
 			
-			print("empty")
+			#print("empty")
 			time.sleep(1)
 		
-		print(threading.currentThread().getName(), " Leaving")
-		return True
+		#print(threading.currentThread().getName(), " Leaving")
+		return
 			
 if __name__ == '__main__':
 
@@ -516,12 +528,17 @@ if __name__ == '__main__':
 	cpus = args.threads
 	filepaths = args.filepaths
 
+	messages = multiprocessing.Queue()
+	
 	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
 	readsCounterLock = multiprocessing.Lock()
-
-	messages = multiprocessing.Queue()
+	
+	counter = multiprocessing.Process(target=count, args=(cpus,messages))
+	counterActive = multiprocessing.RawValue(ctypes.c_bool, False)
+	counter.start()
 
 	s_data = dict()
+	s_data_keys = list()
 	s_error = dict()
 	
 	q_data = multiprocessing.Queue()
@@ -533,28 +550,27 @@ if __name__ == '__main__':
 	previous_filenames = []
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
-		print("Loading ",filename," in RAM using ",cpus," processes")
+		sprint("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
 			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
-					print("sending job: ", i, end="\r")
+					sprint("sending job: ", i, end="\r")
 					multiple_results.append(pool.apply_async(getChunk,args=(filepath,i,cpus)))
 					#pool.apply_async(getChunk,args=(filepath,my_shared_list,i,cpus))
-				print("")
 				#print("Closing pool")
 				pool.close()
 				while True:
 					pFinished=0
 					for res in multiple_results:
 						pFinished += res.ready()
-					print("Loaded: ", round(100*pFinished/len(multiple_results)),"%", end="\r")
+					sprint("Loaded: ", round(100*pFinished/len(multiple_results)),"%", end="\r")
 					if pFinished == len(multiple_results):
-						print("Loaded")
+						sprint("Loaded")
 						break
 				#print("Joining pool")
 				pool.join()
-				print("Merging file")
+				sprint("Merging file")
 				for result in multiple_results:
 					chunk=result.get()
 					gzfile.seek(chunk[0])
@@ -568,7 +584,7 @@ if __name__ == '__main__':
 			gzfile.seek(0)
 			
 			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
-				print("Estimating compression ratio", end="\r")
+				sprint("Estimating compression ratio", end="\r")
 				#Seek the first 10MB (10485760 bytes) of uncompressed data
 				file.seek(10485760)
 				
@@ -576,8 +592,8 @@ if __name__ == '__main__':
 				#the compression ratio
 				c_ratio=gzfile.tell()/file.tell()
 				
-				print("Estimating compression ratio:",round(c_ratio,2))
-				print("Approx. decompressed file: ", round(c_size/c_ratio), " bytes")
+				sprint("Estimating compression ratio:",round(c_ratio,2))
+				sprint("Approx. decompressed file: ", round(c_size/c_ratio), " bytes")
 				
 				#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
 				#As we are estimating the compression ratio with the first 10MB of uncompressed data it
@@ -587,9 +603,9 @@ if __name__ == '__main__':
 					buffersize = 1073741824
 				else:
 					buffersize = round(c_size / (c_ratio * cpus))
-				print("Using chunk size of: ", buffersize)
+				sprint("Using chunk size of: ", buffersize)
 				
-				print("Decompressing and processing")
+				sprint("Decompressing and processing")
 				
 				#Seek the start of the file to start the real decompression
 				file.seek(0)
@@ -597,7 +613,7 @@ if __name__ == '__main__':
 				#Initialise v_block
 				v_block=None
 				
-				print (time.strftime("%c"))
+				sprint (time.strftime("%c"))
 				
 				
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
@@ -608,8 +624,7 @@ if __name__ == '__main__':
 					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
 					
-					counter = multiprocessing.Process(target=count, args=(cpus,messages))
-					counter.start()
+					counterActive.value = True
 					
 					updater = updateShared()
 					updater.start()
@@ -653,8 +668,9 @@ if __name__ == '__main__':
 								multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
 								
 								#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-								sprint(" - Last chunk")
+								
 								sprint("% - block ready - ", file.tell(), " sending job: ")
+								sprint(" - End of the file")
 								
 								break
 								
@@ -767,26 +783,21 @@ if __name__ == '__main__':
 						for index, res in enumerate(multiple_results):
 							if((res.ready()==True) and (pFinished[index] == 0)):
 								pFinished[index] = int(res.ready())
-								print(res.get())
-								sprint(sum(pFinished), "/", len(multiple_results))
+								#print(res.get())
+								sprint(sum(pFinished), "/", len(multiple_results), end="\r")
 						if sum(pFinished) == len(multiple_results):
 							sprint("DONE")
-							sprint(readsCounter[:])
-							updater.stop()
 							break
 						else:
 							time.sleep(1)
 					sprint("Joining pool")
 					pool.join()
 					#print("outer wall exit")
+					sprint(readsCounter[:])
+					updater.stop()
+					counterActive.value = False
 					sprint("Updating the shared dictionary")
-					while messages.empty() == False:
-						pass
-					else:
-						sprint("")
-						counter.terminate()
-					print("")
-					print(len(updater.u_data))
+					sprint("Length: ", len(updater.u_data))
 					s_data.update(updater.u_data)
 					
 					for Ename in updater.u_error:
@@ -806,40 +817,35 @@ if __name__ == '__main__':
 						
 					#3. Check whether there's an entry for the filename
 					#4. If it doesn't exist create the entry and define an empty list on it
+					sprint("updated")
 					del multiple_results
 					gc.collect()
-					
-					
-					self.u_error.extend(e_reads)
-
-					
-					
-		print("LOADED")
+		#sprint("LOADED")
 		previous_filenames.append(filename)
 	#Write the output to disk
-	print("S_data: ", len(s_data))
+	sprint("S_data: ", len(s_data))
 	with multiprocessing.Pool(cpus) as pool:
 		multiple_results = []
 		s_data_keys = list(s_data.keys())
 		ks = len(s_data_keys)
-		print("S_data_keys: ", len(s_data_keys))
+		sprint("S_data_keys: ", len(s_data_keys))
 		tot = 0
 		for i in range(cpus):
 			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
 			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
 			tot += len(slice)
 			del slice
-		print(tot)
-		print("Closing pool")
+		sprint(tot)
+		sprint("Closing pool")
 		pool.close()
-		print("Joining pool")
+		sprint("Joining pool")
 		pool.join()
 		with open(args.output, 'wb') as fh:
 			for res in multiple_results:
 				#print(gzip.decompress(res.get()))
 				fh.write(res.get())
 			fh.close()
-		del s_data_keys
+		s_data_keys = list()
 		
 		output = pathlib.Path(args.output)
 		error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
@@ -855,8 +861,8 @@ if __name__ == '__main__':
 		for filename in error_files:
 			error_files[filename].close()
 	
-	print (time.strftime("%c"))
-	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	sprint (time.strftime("%c"))
+	sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
 	#print(timeit.Timer(save1).timeit(number=1))
 	#print(timeit.Timer(save2).timeit(number=1))
@@ -864,4 +870,4 @@ if __name__ == '__main__':
 	#data={}
 	gc.collect()
 
-	print (time.strftime("%c"))
+	sprint (time.strftime("%c"))
