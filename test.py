@@ -128,7 +128,7 @@ def best_overlap(read1,qual1,read2,qual2):
 				
 	return consensus
 
-def getChunk(sourceFile, i, n_chunks):
+def splitFile(sourceFile, i, n_chunks):
 	'''
 	Chunks sourceFile in n_chunks and returns chunk i.
 	Only the chunk of interest is saved in memory.
@@ -470,7 +470,7 @@ class updateShared:
 		#print("Queues empty")
 		#print("trying to stop")
 		self._running = False
-		self._updater.join
+		self._updater.join()
 		#print("updateshared stop stop")
 
 	def getData(self):
@@ -549,7 +549,198 @@ class updateShared:
 		
 		#print(threading.currentThread().getName(), " Leaving")
 		return
+
+
+def decompressChunks(gzfile):
+	c_size = gzfile.seek(0,2)
+	
+	gzfile.seek(0)
+	
+	with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
+		sprint("Estimating compression ratio", end="\r")
+		#Seek the first 10MB (10485760 bytes) of uncompressed data
+		file.seek(10485760)
+		
+		#Read the position of the pointers in the compressed and uncompressed data to estimate
+		#the compression ratio
+		c_ratio=gzfile.tell()/file.tell()
+		
+		sprint("Estimating compression ratio:",round(c_ratio,2))
+		sprint("Approx. decompressed file: ", round(c_size/c_ratio), " bytes")
+		
+		#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
+		#As we are estimating the compression ratio with the first 10MB of uncompressed data it
+		#can always happen that we underestimate the size and a cpus+1 chunks are generated.
+		#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
+		if (c_size / (c_ratio * cpus)) > 1073741824:
+			buffersize = 1073741824
+		else:
+			buffersize = round(c_size / (c_ratio * cpus))
+		sprint("Using chunk size of: ", buffersize)
+		
+		sprint("Decompressing and processing")
+		
+		#Seek the start of the file to start the real decompression
+		file.seek(0)
+		
+		#Initialise v_block
+		v_block=None
+		
+		#This loop allows to scan the whole file using chunks of defined size
+		while True:
+			#Read a chunk of length buffersize
+			chunk = file.read(buffersize)
+			#Chunk should be at least an empty byte string b''. Something went wrong if it's None
+			if chunk == None:
+				#print(int(procID+1), " - EOF - flushing")
+				#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+				sprint("Error?")
+				exit()
+				break
+			#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
+			#If there was a previous v_block, this is the last chunk of the file
+			#If it was the last chunk, it will be taken care later in the code
+			elif (len(chunk) < buffersize) and (v_block == None):
+				#If no previous v_block was loaded, this is the first and last chunk and therefore the whole file
+				#Define the chunk as v_block
+				v_block = chunk
+				
+				#size=sys.getsizeof(v_block)
+				#sprint("Size u: ", size)
+				#results_z = zlib.compress(v_block,1)
+				#sprint("Size c: ", sys.getsizeof(results_z))
+				#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
+				
+				
+				#sprint("sending job")
+				#Send a new process for the v_block
+				
+				#sprint("block ready - ", file.tell())
+				#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+				sprint( " - File read in one chunk")
+				
+				return v_block
 			
+			#If chunk length is 0 we have reached the end of the file
+			elif len(chunk) == 0:
+				#sprint("EOF reached")
+				#print(len(chunk))
+				#print(len(v_block))
+				
+				#size=sys.getsizeof(v_block)
+				#sprint("Size u: ", size)
+				#results_z = zlib.compress(v_block,1)
+				#sprint("Size c: ", sys.getsizeof(results_z))
+				#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
+				
+				sprint(" |- block ready - ", file.tell())
+				#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+							
+				sprint(" - End of the file")
+				return v_block
+			
+			#If the pointer position equals buffersize, we are in the first chunk of a longer file
+			elif file.tell() == buffersize:
+				#TODO: At this point, v_block should be None. We should assert for this to be sure.
+				
+				#Define the chunk as v_block
+				#At this point, v_block is not ready yet as we don't know if it ends in the middle of a sequence
+				v_block = chunk
+				
+				sprint(" - Very beginning of the file")
+				
+			#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
+			#as the chunk may be ending in the middle of a sequence, and that's not good.
+			else:
+				'''
+				This function works around the structure of a FASTQ read to know whether it is inside a read or not.
+				A fastq read is structured in blocks of 4 lines as follows:
+					@Name_of_the_read
+					SEQUENCE
+					+
+					QUALITY_VALUES
+				Bear in mind that @ and + are valid quality values, so that must be considered when writting the
+				algorythms
+				
+				The first step is find a line that starts with "+" from our offset in the chunk (initially 0).
+				That line can either be the line containing + or the line with the quality values if the first
+				value is +. That will be our initial seed position.
+				
+				Then we find the first line starting with "@" contained between the offset position and the seed position.
+				The line found is guaranteed to be the beginning of a read. If the quality values of this read would
+				start with @, our seed would have stopped at the line that contains the +. So the previous reported line
+				starting with @ would still be the beggining of the read.
+				
+				Once the beggining of the read has been located, that will be the splitting offset to end the previous
+				v_block and start a new v_block
+				
+				'''
+				#Set the initial offset to 0
+				offset=0
+				
+				#Find the first line that starts with "+" which will be our seed and store its position
+				seed = chunk.find(b"\n+", offset)
+				
+				#print(seed)
+				
+				#This loop allows to scan the chunk until the boundaries of the read have been determined
+				while True:
+					#If no seed was found, we are in the middle of a read and therefore we must continue extending v_block
+					if seed==-1:
+						#print("still inside a block")
+						
+						#Append the chunk to the existing v_block
+						v_block += chunk
+						break
+					
+					#If a seed was found, we need to find the boundaries of the read where the seed is
+					else:
+						#print("Seed (\\n+) found at: ", seed)
+						
+						#Find the first line that starts with "@" between the offset and the seed which will be the start of
+						#a new read and store its position
+						newblock = chunk.rfind(b"\n@", offset, seed)
+						
+						#If there was no line starting with "@" between the offset and the seed
+						if newblock == -1:
+							#Set the offset one character after the seed position to start the seed search again
+							offset = seed + 1
+							
+							#Search for a new seed position
+							seed = chunk.find(b"\n+", offset)
+							
+						#If there was a line starting with "@" between the offset and the seed
+						else:
+							#print("First line starting with @ before the seed: ", newblock)
+							
+							#Exclude the newline character from the newblock position. At the moment, newblock contains the
+							#newline character used in the search, which doesn't correspond to the beginning of the new read
+							#and needs to be excluded in the new v_block.
+							newblock += 1
+							
+							#Append the chunk until the newblock position to the existing v_block
+							v_block += chunk[:newblock]
+							#size=sys.getsizeof(v_block)
+							#sprint("Size u: ", size)
+							#results_z = zlib.compress(v_block,1)
+							#sprint("Size c: ", sys.getsizeof(results_z))
+							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
+							
+							sprint(" |- block ready - ", file.tell())
+							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+							
+							yield v_block
+							
+							#Define the rest of the chunk as the new v_block
+							v_block = chunk[newblock:]
+							break
+							
+				#print("inner wall exit")
+	sprint("100%")
+	return
+			
+			
+
 if __name__ == '__main__':
 	#from multiprocessing.process import current_process
 	#current_process()._config["tempdir"] = "/dev/shm"
@@ -592,246 +783,56 @@ if __name__ == '__main__':
 				multiple_results=[]
 				for i in range(cpus+1):
 					sprint("sending job: ", i, end="\r")
-					multiple_results.append(pool.apply_async(getChunk,args=(filepath,i,cpus)))
-					#pool.apply_async(getChunk,args=(filepath,my_shared_list,i,cpus))
+					multiple_results.append(pool.apply_async(splitFile,args=(filepath,i,cpus)))
+					#pool.apply_async(splitFile,args=(filepath,my_shared_list,i,cpus))
 				#print("Closing pool")
 				pool.close()
+				pFinished = [0]*len(multiple_results)
 				while True:
-					pFinished=0
-					for res in multiple_results:
-						pFinished += res.ready()
-					sprint("Loaded: ", round(100*pFinished/len(multiple_results)),"%", end="\r")
-					if pFinished == len(multiple_results):
+					for index, res in enumerate(multiple_results):
+						if((res.ready() == True) and (pFinished[index] == 0)):
+							gzchunk = res.get()
+							gzfile.seek(gzchunk[0])
+							gzfile.write(gzchunk[1])
+							pFinished[index] = int(res.ready())
+							sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
+					
+					if sum(pFinished) == len(pFinished):
 						sprint("Loaded")
+						#print("Joining pool")
+						pool.join()
 						break
-				#print("Joining pool")
-				pool.join()
-				sprint("Merging file")
-				for result in multiple_results:
-					chunk=result.get()
-					gzfile.seek(chunk[0])
-					gzfile.write(chunk[1])
-				
-				del chunk
+					else:
+						time.sleep(1)
+				del gzchunk
 				del multiple_results
-			
-			c_size = gzfile.seek(0,2)
-			
-			gzfile.seek(0)
-			
-			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
-				sprint("Estimating compression ratio", end="\r")
-				#Seek the first 10MB (10485760 bytes) of uncompressed data
-				file.seek(10485760)
-				
-				#Read the position of the pointers in the compressed and uncompressed data to estimate
-				#the compression ratio
-				c_ratio=gzfile.tell()/file.tell()
-				
-				sprint("Estimating compression ratio:",round(c_ratio,2))
-				sprint("Approx. decompressed file: ", round(c_size/c_ratio), " bytes")
-				
-				#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
-				#As we are estimating the compression ratio with the first 10MB of uncompressed data it
-				#can always happen that we underestimate the size and a cpus+1 chunks are generated.
-				#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
-				if (c_size / (c_ratio * cpus)) > 1073741824:
-					buffersize = 1073741824
-				else:
-					buffersize = round(c_size / (c_ratio * cpus))
-				sprint("Using chunk size of: ", buffersize)
-				
-				sprint("Decompressing and processing")
-				
-				#Seek the start of the file to start the real decompression
-				file.seek(0)
-				
-				#Initialise v_block
-				v_block=None
-				
-				sprint (time.strftime("%c"))
 				
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
 				with multiprocessing.Pool(processes=cpus, initializer=init_processReads, initargs=(readsCounter,readsCounterLock, q_data, q_error)) as pool:
-					
 					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
+					
+					sprint (time.strftime("%c"))
 					
 					counterActive.value = True
 					
 					updater = updateShared()
 					updater.start()
 					
-					#This loop allows to scan the whole file using chunks of defined size
-					while True:
-						#Read a chunk of length buffersize
-						chunk = file.read(buffersize)
-						#Chunk should be at least an empty byte string b''. Something went wrong if it's None
-						if chunk == None:
-							#print(int(procID+1), " - EOF - flushing")
-							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-							sprint("Error?")
-							exit()
-							break
-						#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
-						#If there was a previous v_block, this is the last chunk of the file
-						#If it was the last chunk, it will be taken care later in the code
-						elif (len(chunk) < buffersize) and (v_block == None):
-							#If no previous v_block was loaded, this is the first and last chunk and therefore the whole file
-							#Define the chunk as v_block
-							v_block = chunk
-							
-							#size=sys.getsizeof(v_block)
-							#sprint("Size u: ", size)
-							#results_z = zlib.compress(v_block,1)
-							#sprint("Size c: ", sys.getsizeof(results_z))
-							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
-							
-							
-							#sprint("sending job")
-							#Send a new process for the v_block
-							multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
-							
-							sprint("block ready - ", file.tell())
-							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-							
-							sprint( " - File read in one chunk")
-							break
-						
-						#If chunk length is 0 we have reached the end of the file
-						elif len(chunk) == 0:
-							sprint("EOF reached")
-							#print(len(chunk))
-							#print(len(v_block))
-							
-							#size=sys.getsizeof(v_block)
-							#sprint("Size u: ", size)
-							#results_z = zlib.compress(v_block,1)
-							#sprint("Size c: ", sys.getsizeof(results_z))
-							#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
-							
-							
-							#sprint("sending job")
-							#Send a new process for the v_block
-							multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
-							
-							sprint("block ready - ", file.tell())
-							#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-										
-							sprint(" - End of the file")
-							break
-						
-						#If the pointer position equals buffersize, we are in the first chunk of a longer file
-						elif file.tell() == buffersize:
-							#TODO: At this point, v_block should be None. We should assert for this to be sure.
-							
-							#Define the chunk as v_block
-							#At this point, v_block is not ready yet as we don't know if it ends in the middle of a sequence
-							v_block = chunk
-							
-							sprint(" - Very beginning of the file")
-							
-						#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
-						#as the chunk may be ending in the middle of a sequence, and that's not good.
-						else:
-							'''
-							This function works around the structure of a FASTQ read to know whether it is inside a read or not.
-							A fastq read is structured in blocks of 4 lines as follows:
-								@Name_of_the_read
-								SEQUENCE
-								+
-								QUALITY_VALUES
-							Bear in mind that @ and + are valid quality values, so that must be considered when writting the
-							algorythms
-							
-							The first step is find a line that starts with "+" from our offset in the chunk (initially 0).
-							That line can either be the line containing + or the line with the quality values if the first
-							value is +. That will be our initial seed position.
-							
-							Then we find the first line starting with "@" contained between the offset position and the seed position.
-							The line found is guaranteed to be the beginning of a read. If the quality values of this read would
-							start with @, our seed would have stopped at the line that contains the +. So the previous reported line
-							starting with @ would still be the beggining of the read.
-							
-							Once the beggining of the read has been located, that will be the splitting offset to end the previous
-							v_block and start a new v_block
-							
-							'''
-							#Set the initial offset to 0
-							offset=0
-							
-							#Find the first line that starts with "+" which will be our seed and store its position
-							seed = chunk.find(b"\n+", offset)
-							
-							#print(seed)
-							
-							#This loop allows to scan the chunk until the boundaries of the read have been determined
-							while True:
-								#If no seed was found, we are in the middle of a read and therefore we must continue extending v_block
-								if seed==-1:
-									#print("still inside a block")
-									
-									#Append the chunk to the existing v_block
-									v_block += chunk
-									break
-								
-								#If a seed was found, we need to find the boundaries of the read where the seed is
-								else:
-									#print("Seed (\\n+) found at: ", seed)
-									
-									#Find the first line that starts with "@" between the offset and the seed which will be the start of
-									#a new read and store its position
-									newblock = chunk.rfind(b"\n@", offset, seed)
-									
-									#If there was no line starting with "@" between the offset and the seed
-									if newblock == -1:
-										#Set the offset one character after the seed position to start the seed search again
-										offset = seed + 1
-										
-										#Search for a new seed position
-										seed = chunk.find(b"\n+", offset)
-										
-									#If there was a line starting with "@" between the offset and the seed
-									else:
-										#print("First line starting with @ before the seed: ", newblock)
-										
-										#Exclude the newline character from the newblock position. At the moment, newblock contains the
-										#newline character used in the search, which doesn't correspond to the beginning of the new read
-										#and needs to be excluded in the new v_block.
-										newblock += 1
-										
-										#Append the chunk until the newblock position to the existing v_block
-										v_block += chunk[:newblock]
-										#size=sys.getsizeof(v_block)
-										#sprint("Size u: ", size)
-										#results_z = zlib.compress(v_block,1)
-										#sprint("Size c: ", sys.getsizeof(results_z))
-										#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
-										
-										
-										#sprint("sending job")
-										#Send a new process for the v_block
-										multiple_results.append(pool.apply_async(processReads,args=(v_block,)))
-										
-										sprint("block ready - ", file.tell())
-										#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-										
-										#Define the rest of the chunk as the new v_block
-										v_block = chunk[newblock:]
-
-										break
-							#print("inner wall exit")
-					sprint("100%")
-					del v_block
-					del chunk
-					file.close()
-					gzfile.close()
+					for chunk in decompressChunks(gzfile):
+						#sprint("sending job")
+						#Send a new process for the chunk
+						multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
 					
 					#print("Closing pool")
 					pool.close()
+					
+					gzfile.close()
+
 					sprint("Waiting for results to be ready")
+					
 					pFinished = [0]*len(multiple_results)
 					
 					while True:
@@ -839,43 +840,40 @@ if __name__ == '__main__':
 							if((res.ready()==True) and (pFinished[index] == 0)):
 								pFinished[index] = int(res.ready())
 								#print(res.get())
-								sprint(sum(pFinished), "/", len(multiple_results), end="\r")
+								sprint(sum(pFinished), "/", len(pFinished), end="\r\n")
 						if sum(pFinished) == len(multiple_results):
 							sprint("DONE")
+							#sprint("Joining pool")
+							pool.join()
 							break
 						else:
 							time.sleep(1)
-					sprint("Joining pool")
-					pool.join()
-					#print("outer wall exit")
+					
 					#sprint(readsCounter[:])
+					del multiple_results
+					
 					updater.stop()
+					
 					counterActive.value = False
+					
 					sprint("Updating the shared dictionary")
-					sprint("Length: ", len(updater.length()))
+					sprint("Length: ", updater.length())
 					s_data.update(updater.getData())
 					
 					for Ename in updater.getErrors():
-						#1. Check whether the entry exists already in the dictioniary
-						#2. If it doesn't exist define a dictionary for it
-						if Ename not in s_error:
-							s_error[Ename] = dict()
 						if Ename in s_data:
 							for previous_filename in previous_filenames:
-								s_error[Ename].setdefault(previous_filename,list()).append(s_data[Ename])
+								s_error.setdefault(Ename,dict()).setdefault(previous_filename,list()).append(s_data[Ename])
 							s_data.pop(Ename)
 							readsCounter[(cpus*5) + 3] += 1 #error
 							readsCounter[(cpus*5)] -= 1 #Substract the read from added
 							
-						s_error[Ename].setdefault(filename, list()).extend(updater.u_error[Ename])
-						#u_error.pop(Ename)
+						s_error.setdefault(Ename,dict()).setdefault(filename, list()).extend(updater.u_error[Ename])
 						
-					#3. Check whether there's an entry for the filename
-					#4. If it doesn't exist create the entry and define an empty list on it
-					sprint("updated")
-					del multiple_results
+					sprint("Shared dictionary updated")
+					
 					gc.collect()
-		#sprint("LOADED")
+		sprint("File processed succesfully")
 		previous_filenames.append(filename)
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
