@@ -269,7 +269,8 @@ def processReads(chunk):
 	global s_data
 	global s_error
 	procID = None
-	
+	chunk_index = -1
+	file = None
 	with readsCounterLock:
 		while procID == None:
 			for counter in range(0,(len(readsCounter)-4),5):
@@ -277,6 +278,19 @@ def processReads(chunk):
 					readsCounter[counter] = 1
 					procID = counter
 					break
+	'''
+	with FASTQ_chunks.get_lock():
+		sprint("Loading chunk")
+		for index in range(len(FASTQ_chunks)):
+			if(len(FASTQ_chunks[index]) > 0):
+				file = io.BytesIO(FASTQ_chunks[index])
+				FASTQ_chunks[index] = b''
+				break
+		if file == None:
+			sprint("No chunks left to process")
+			return True
+	'''
+
 	
 	p_error={}
 	p_data={}
@@ -297,12 +311,15 @@ def processReads(chunk):
 	#sprint("v_block decompressed")
 	
 	#Load the byteString into a byteStream to loop over it
-	with io.BytesIO(loadedFASTQ.value) as file:
+	with io.BytesIO(FASTQ_chunks[chunk]) as file:
+		#Erase the chunk to release mempory
+		chunk_length = len(FASTQ_chunks[chunk])
+		FASTQ_chunks[chunk] = b''
 		#Make sure we are at the beginning of the stream.
-		file.seek(chunk[0])
+		file.seek(0)
 		
 		#Execute until we reach the EOF
-		while file.tell() < chunk[1]: 
+		while file.tell() < chunk_length: 
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
 				readsCounter[procID + 1] += private_counter[0]
@@ -450,14 +467,14 @@ def processReads(chunk):
 	
 	return True
 
-def init_processReads(loadedFASTQ_, readsCounter_, readsCounterLock_, q_data_, q_error_):
+def init_processReads(FASTQ_chunks_, readsCounter_, readsCounterLock_, q_data_, q_error_):
 	#print("init_processReads start")
-	global readsCounter, readsCounterLock
+	global readsCounter, readsCounterLock, FASTQ_chunks, q_data, q_error
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
 	q_data = q_data_
 	q_error = q_error_
-	loadedFASTQ = loadedFASTQ_
+	FASTQ_chunks = FASTQ_chunks_
 	#print("init_processReads stop") 
 
 
@@ -517,9 +534,8 @@ class updateShared:
 		#print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
-			sprint("U_files left: ", q_data.qsize())
 			while q_data.empty() == False:
-				sprint("U_files left: ", q_data.qsize())
+				sprint("U_files left: ", q_data.qsize(), end="\r")
 				#name, read = q_data.get()
 				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
 				#p_data, p_error = pickle.loads(q_data.get())
@@ -573,7 +589,7 @@ class updateShared:
 		return
 
 
-def decompressChunks(filepath, rawValue):
+def decompressChunks(filepath):
 	'''
 	This function works around the structure of a FASTQ read to know whether it is inside a read or not.
 	A fastq read is structured in blocks of 4 lines as follows:
@@ -602,14 +618,14 @@ def decompressChunks(filepath, rawValue):
 	#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 	#can always happen that we underestimate the size and a cpus+1 chunks are generated.
 	#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
-	#file = io.BytesIO(rawValue)
+	#file = io.BytesIO(rawArray)
 	with open(filepath, 'rb') as gzfile:
-		sprint("Estimating compression ratio", end="\r")
+		sprint("Estimating compression ratio")
 		#Seek the first 10MB (10485760 bytes) of uncompressed data
 		gz_size = gzfile.seek(0, 2)
 		gzfile.seek(0)
 		
-		sprint("Compressed file size: ", gz_size)
+		sprint("Compressed file size: ", round(gz_size/(1024*1024)), " MB")
 
 		with gzip.open(gzfile, 'rb') as file:
 		
@@ -622,7 +638,7 @@ def decompressChunks(filepath, rawValue):
 			file.seek(0)
 			gzfile.seek(0)
 			
-			sprint("Estimated compression ratio:",round(gz_ratio, 2))
+			sprint("Estimated compression ratio:", round(gz_ratio, 2))
 			sprint("Approx. decompressed file size: ", round(f_size/(1024*1024)), " MB")
 			
 			if (f_size/cpus) > 3*1024*1024*1024:
@@ -630,7 +646,7 @@ def decompressChunks(filepath, rawValue):
 			else:
 				buffersize = math.ceil(f_size/cpus)
 				
-			sprint("Using chunk size of: ", buffersize)
+			sprint("Using chunk size of: ", round(buffersize/(1024*1024)), " MB")
 			
 			sprint("Decompressing and generating chunks")
 			
@@ -644,52 +660,55 @@ def decompressChunks(filepath, rawValue):
 				#If there was a previous v_block, this is the last chunk of the file
 				#If it was the last chunk, it will be taken care later in the code
 				if offset_0 == 0 and offset > f_size:
-					print("File read in one chunk")
+					
 					#as the f_size is approximate, read all to reach the end of the file
 					#empty first whatever is left into the peek_buffer
-					rawValue.value = peek_buffer + file.read()
-					print("transfering the results: ", (offset_0,file.tell()))
-					chunks.append((offset_0, file.tell()))
+					sprint("transfering the results: ", (offset_0,file.tell()), end="\r")
+					chunks.append(peek_buffer + file.read())
+					content.close()
+					sprint("File read in one chunk")
 					return chunks
-				elif f_size > offset_0 and offset > f_size:
-					print("EOF reached")
-					content.write(peek_buffer)
-					content.write(file.read())
-					rawValue.value = content.getvalue()
-					print("transfering the results: ", (offset_0,file.tell()))
-					chunks.append((offset_0, file.tell()))
+				elif f_size > offset_0 and (offset >= f_size or offset_0+len(peek_buffer) >= f_size):
+					sprint("transfering the results: ", (offset_0,file.tell()), end="\r")
+					chunks.append(peek_buffer + file.read())
+					content.close()
+					sprint("EOF reached")
 					return chunks
 				#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
 				#as the chunk may be ending in the middle of a sequence, and that's not good.
 				else:
 
 					#Find the first line that starts with "+" which will be our seed and store its position
-					print("Seeking offset ", offset)
+					sprint("Clearing content", end="\r\n")
+					content.seek(0)
+					content.truncate()
+					sprint("f_size: ", f_size, " Offset0: ", offset_0, " Offset: ", offset, " Peek length: ", len(peek_buffer))
+					sprint(round(offset_0*100/f_size), "% Seeking offset ", offset, end="\r\n")
 					content.write(peek_buffer)
 					content.write(file.read(offset - offset_0 - len(peek_buffer)))
-					sprint(file.tell(), "=", offset, "=", content.tell())
-					print("Peeking 10MB data")
+					sprint(file.tell(), "=", offset, "=", content.tell(), end="\r\n")
+					sprint("Peeking 10MB data", end="\r\n")
 					peek_buffer = file.read(peek_size)
-					print(len(peek_buffer))
-					print("Searching the + line")
+					#sprint(len(peek_buffer))
+					sprint("Searching the + line", end="\r\n")
 					seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
 								
 					#This loop allows to scan the chunk until the boundaries of the read have been determined
 					while True:
 						#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
 						if seed == 0:
-							print("+ line not found in peek data, extending peek")
+							sprint("+ line not found in peek data, extending peek", end="\r")
 							#Append the chunk to the existing v_block
 							#v_block += chunk
-							print("Peeking 10MB more of data")
+							sprint("Peeking 10MB more of data", end="\r")
 							peek_buffer += file.read(peek_size)
-							print("Searching the + line")
+							sprint("Searching the + line", end="\r")
 							seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-							print(len(peek_buffer))
+							sprint(len(peek_buffer))
 						
 						#If a seed was found, we need to find the boundaries of the read where the seed is
 						else:
-							print("+ found at: ", seed)
+							sprint("+ found at: ", seed, end="\r")
 							
 							#Find the first line that starts with "@" between the offset and the seed which will be the start of
 							#a new read and store its position
@@ -697,34 +716,34 @@ def decompressChunks(filepath, rawValue):
 							
 							#If there was no line starting with "@" between the offset and the seed
 							if newblock == 0:
-								print("@ not found in peek data. Moving offset to seed point")
+								sprint("@ not found in peek data. Moving offset to seed point", end="\r")
 								#Set the offset one character after the seed position to start the seed search again
-								print("Updating offset")
+								sprint("Updating offset", end="\r")
 								offset += seed
-								print("Updating rawvalue")
+								sprint("Updating rawvalue", end="\r")
 								content.write(peek_buffer[:seed])
-								print("Updating peek_buffer")
+								sprint("Updating peek_buffer", end="\r")
 								peek_buffer = peek_buffer[seed:]
-								print("Searching the + line")
+								sprint("Searching the + line", end="\r")
 								seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-								print(len(peek_buffer))
+								#sprint(len(peek_buffer))
 								
 							#If there was a line starting with "@" between the offset and the seed
 							else:
-								print("@ found at: ", newblock)
+								sprint("@ found at: ", newblock, end="\r")
 								#Exclude the newline character from the newblock position. At the moment, newblock contains the
 								#newline character used in the search, which doesn't correspond to the beginning of the new read
 								#and needs to be excluded in the new v_block.
-								print("Updating offset")
+								sprint("Updating offset", end="\r")
 								offset += newblock
-								print("Updating rawvalue")
+								sprint("Updating rawvalue", end="\r")
 								content.write(peek_buffer[:newblock])
-								print("Updating peek_buffer")
+								sprint("Updating peek_buffer", end="\r")
 								peek_buffer = peek_buffer[newblock:]
 								
-								print("transfering the results: ", (offset_0,offset))
-								chunks.append((offset_0,offset))
-								print("Loading new offsets")
+								sprint("transfering the results: ", (offset_0,offset), end="\r")
+								chunks.append(content.getvalue())
+								sprint("Loading new offsets", end="\r")
 								offset_0 = offset
 								offset = offset_0 + buffersize
 								break
@@ -759,7 +778,7 @@ if __name__ == '__main__':
 	
 	updater = updateShared()
 	
-	loadedFASTQ = multiprocessing.RawValue(ctypes.c_char_p, b'')
+	FASTQ_chunks = multiprocessing.RawArray(ctypes.c_char_p, [b''])
 	
 	s_data = dict()
 	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, [b''])
@@ -773,69 +792,23 @@ if __name__ == '__main__':
 	previous_filenames = set()
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
-		'''
-		t0=time.time()
-		sprint("Loading ",filename," in RAM using ",cpus," processes")
-		with io.BytesIO() as gzfile:
-			with multiprocessing.Pool(cpus+1) as pool:
-				multiple_results=[]
-				for i in range(cpus+1):
-					sprint("sending job: ", i, end="\r")
-					multiple_results.append(pool.apply_async(splitFile,args=(filepath,i,cpus)))
-					#pool.apply_async(splitFile,args=(filepath,my_shared_list,i,cpus))
-				#print("Closing pool")
-				sprint(len(multiple_results), " jobs succesfully sent")
-				pool.close()
-				
-				pFinished = [0]*len(multiple_results)
-				sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
-				
-				while True:
-					for index, res in enumerate(multiple_results):
-						if((res.ready() == True) and (pFinished[index] == 0)):
-							gzchunk = res.get()
-							gzfile.seek(gzchunk[0])
-							gzfile.write(gzchunk[1])
-							pFinished[index] = int(res.ready())
-							sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
-					
-					if sum(pFinished) == len(pFinished):
-						sprint("File loaded in ", time.time()-t0)
-						#print("Joining pool")
-						pool.join()
-						break
-					else:
-						time.sleep(1)
-				del gzchunk
-				del multiple_results
-			
-			sprint("Decompressing file")
-			gzfile.seek(0)
-			with gzip.open(gzfile, 'rb') as f_in:
-				with io.BytesIO() as f_out:
-					shutil.copyfileobj(f_in, f_out)
-					loadedFASTQ.value = f_out.getvalue()
-			sprint("File decompressed in ", time.time()-t0)
-		'''
-		t0=time.time()	
-		chunks = decompressChunks(filepath, loadedFASTQ)
-		sprint(time.time()-t0)
+		sprint("Processing file: ", filename)
+		FASTQ_chunks = multiprocessing.Array(ctypes.c_char_p, decompressChunks(filepath))
+
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
-		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(loadedFASTQ, readsCounter, readsCounterLock, q_data, q_error)) as pool:
+		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(FASTQ_chunks, readsCounter, readsCounterLock, q_data, q_error)) as pool:
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
-			
-			sprint (time.strftime("%c"))
 			
 			updater.start()
 			
 			sprint("RAM: ", py.memory_info().rss)
-			for chunk in chunks:
+			for chunk in range(len(FASTQ_chunks)):
 				#sprint("Sending job ", len(multiple_results)+1)
 				#Send a new process for the chunk
-				sprint(chunk)
+				#sprint(chunk)
 				#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
 				#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
 				multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
@@ -854,7 +827,7 @@ if __name__ == '__main__':
 				for index, res in enumerate(multiple_results):
 					if((res.ready()==True) and (pFinished[index] == 0)):
 						pFinished[index] = int(res.ready())
-						print(res.get())
+						res.get() #Force errors in processes to be shown
 						sprint(sum(pFinished), "/", len(pFinished), end="\r")
 				if sum(pFinished) == len(multiple_results):
 					sprint(sum(pFinished), "/", len(pFinished), " DONE")
