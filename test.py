@@ -19,33 +19,6 @@ import zlib
 import sys
 import pathlib
 
-#from multiprocessing.process import current_process
-#current_process()._config["tempdir"] = "/dev/shm"
-
-print (time.strftime("%c"))
-
-py = psutil.Process(os.getpid())
-
-parser = argparse.ArgumentParser(description='Dedupe.')
-parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
-parser.add_argument('--output','-o', type=str, help='output filename')
-parser.add_argument('filepaths', nargs='+', help='files to process')
-
-args = parser.parse_args()
-cpus = args.threads
-filepaths = args.filepaths
-
-readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
-readsCounterLock = multiprocessing.Lock()
-
-messages = multiprocessing.Queue()
-
-s_data = dict()
-s_error = dict()
-
-#lock_manager = manager.Lock()
-#locked = multiprocessing.RawValue(ctypes.c_bool, False)
-
 def sprint(*args, end="\r\n"):
 	global messages
 	
@@ -419,13 +392,34 @@ def init_processReads(readsCounter_, readsCounterLock_):
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
 	
-def gzip_nochunks_byte_u3():
-	global cpus
-	global readsCounter
-	global readsCounterLock
-	global s_data #Global shared dictionary containing the deduped reads
-	global s_error #Global shared dictionary containing the error reads
-	global messages
+if __name__ == '__main__':
+
+	#from multiprocessing.process import current_process
+	#current_process()._config["tempdir"] = "/dev/shm"
+
+	print (time.strftime("%c"))
+
+	py = psutil.Process(os.getpid())
+
+	parser = argparse.ArgumentParser(description='Dedupe.')
+	parser.add_argument('--threads','-t', type=int, default=int(multiprocessing.cpu_count()/2), help='threads to use')
+	parser.add_argument('--output','-o', type=str, help='output filename')
+	parser.add_argument('filepaths', nargs='+', help='files to process')
+
+	args = parser.parse_args()
+	cpus = args.threads
+	filepaths = args.filepaths
+
+	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
+	readsCounterLock = multiprocessing.Lock()
+
+	messages = multiprocessing.Queue()
+
+	s_data = dict()
+	s_error = dict()
+
+	#lock_manager = manager.Lock()
+	#locked = multiprocessing.RawValue(ctypes.c_bool, False)
 	
 	previous_filenames = []
 	for filepath in filepaths:
@@ -817,10 +811,4 @@ def gzip_nochunks_byte_u3():
 	#data={}
 	gc.collect()
 
-ncbu3=timeit.Timer(gzip_nochunks_byte_u3).timeit(number=1)
-
-print("ncbu3=",ncbu3)
-
-print (time.strftime("%c"))
-
-exit()
+	print (time.strftime("%c"))
