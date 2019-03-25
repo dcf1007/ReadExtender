@@ -7,181 +7,28 @@ import mmap
 import io
 import gc
 import argparse
+import psutil
+import multiprocessing
 
 print (time.strftime("%c"))
+mypid=os.getpid()
+py = psutil.Process(mypid)
 
 parser = argparse.ArgumentParser(description='Dedupe.')
 parser.add_argument('filenames', nargs='+', help='files to process')
 args = parser.parse_args()
 filenames=args.filenames
-print(filenames)
 
-def gzip_chunks():
-	with gzip.open(filename, 'r') as fh:
-		file=fh.read()
-		fileStream=io.BytesIO(file)
-		v_block=None
-		buffersize=int(len(file)/64)
-		print(len(file))
-		i=1
-		while True:
-			chunk=fileStream.read(buffersize)
-			if chunk == None:
-				print(i, " - EOF - flushing")
-				#print("----\n",v_block,"\n----")
-				break
-			elif len(chunk) < buffersize:
-				print(i," - File read in one chunk or last chunk")
-				v_block = chunk
-				#print("----\n",v_block,"\n----")
-				break
-			elif fileStream.tell() == buffersize:
-				print(i," - Very beginning of the file")
-				v_block = chunk
-			elif chunk[:1] == b"@" and v_block[-1:] == b"\n":
-					print(i," - block ready - ",fileStream.tell())
-					i+=1
-					#print("----\n",v_block,"\n----")
-					v_block = chunk
-			else:
-				newblock = chunk.find(b"\n@")
-				#print("New block: ", newblock)
-				if newblock == -1:
-					#print("still inside a block")
-					v_block += chunk
-				else:
-					v_block += chunk[:newblock+1]
-					print(i, " - block ready - ",fileStream.tell())
-					i+=1
-					#print("----\n",v_block,"\n----")
-					v_block = chunk[newblock+1:]
-			# read line
-			'''
-			name = fh.readline().strip()
-			read = fh.readline().strip()
-			fh.readline()
-			qual = fh.readline().strip()
-			if not (name or read or qual):
-				break
-			if (len(read) == len(qual)):
-				zname=zlib.compress(name)
-				# in python 2, print line
-				# in python 3
-				#print(len(line.strip().encode('utf8')), " vs ", len(zlib.compress(line.strip().encode('utf8'),9)))
-				if zname in compressed_data:
-					s_read = zlib.decompress(compressed_data[zname][0])
-					if read == s_read:
-						print("identical")
-					elif read in s_read:
-						print("read is longer")
-					elif s_read in read:
-						print("s_read is longer")
-					else:
-						print("error")
-						print(zlib.decompress(zname))
-						print(s_read)
-						print(read)
-				else:
-					compressed_data[zname]=(zlib.compress(read),zlib.compress(qual))
-					#print(name,read.strip(),qual.strip())
-				# check if line is not empty
-			'''
-		fh.close()
+manager = multiprocessing.Manager()
+data_manager = manager.dict()
+error_manager = manager.dict()
+lock_manager = manager.Lock()
 
-compressed_data = {}
-
-def gzip_nochunks_byte():
-	with gzip.open(filename, 'rb') as fh:
-		file=fh.read()
-		fileStream=io.BytesIO(file)
-		while True:
-			name = fileStream.readline().strip()
-			read = fileStream.readline().strip()
-			fileStream.readline()
-			qual = fileStream.readline().strip()
-			if not (name or read or qual):
-				break
-			if (len(read) == len(qual)):
-				zname=zlib.compress(name)
-				# in python 2, print line
-				# in python 3
-				#print(len(line.strip().encode('utf8')), " vs ", len(zlib.compress(line.strip().encode('utf8'),9)))
-				if zname in compressed_data:
-					s_read = zlib.decompress(compressed_data[zname][0])
-					if read == s_read:
-						#print("identical")
-						pass
-					elif read in s_read:
-						#print("read is longer")
-						pass
-					elif s_read in read:
-						#print("s_read is longer")
-						pass
-					else:
-						print("error")
-						print(zlib.decompress(zname))
-						print(s_read)
-						print(read)
-				else:
-					compressed_data[zname]=(zlib.compress(read),zlib.compress(qual))
-					#print(name,read.strip(),qual.strip())
-				# check if line is not empty
-
-data={}
-				
-def gzip_nochunks_byte_u():
-	for filename in filenames:
-		print("Processing file: ", filename)
-		with gzip.open(filename, 'rb') as fh:
-			file=fh.read()
-			fileStream=io.BytesIO(file)
-			while True:
-				name = fileStream.readline().strip()
-				read = fileStream.readline().strip()
-				fileStream.readline()
-				qual = fileStream.readline().strip()
-				if not (name or read or qual):
-					print("EOF reached")
-					break
-				if (len(read) == len(qual)):
-					if name in data:
-						s_read = data[name][0]
-						s_qual = data[name][1]
-						if read == s_read:
-							#print(name.decode("UTF-8"),": identical",)
-							pass
-						elif read in s_read:
-							#print(name.decode("UTF-8"),": s_read is longer")
-							pass
-						elif s_read in read:
-							#print(name.decode("UTF-8"),": read is longer, storing")
-							data[name]=(read,qual)
-						else:
-							consensus=best_overlap(read,qual,s_read,s_qual)
-							if consensus == -1:
-								consensus=best_overlap(s_read,s_qual,read,qual)
-							if consensus == -1:
-								print(name.decode("UTF-8"),": error",)
-							else:
-							#	print(name.decode("UTF-8"),": consensus found",)
-								data[name]=(consensus)
-					else:
-						data[name]=(read,qual)
-			del file
-			del fileStream
-			fh.close()
-		gc.collect()
-	#Write the output to disk
-	with gzip.open('all.fastq.gz', 'wb') as fh:
-		for key, value in data.items():
-			fh.write(key+b"\n")
-			fh.write(value[0]+b"\n")
-			fh.write(b"+")
-			fh.write(value[1]+b"\n")
-		fh.close()
-	#data={}
-	gc.collect()
-	#Done
+i_total=manager.Value("i",0)
+i_added=manager.Value("i",0)
+i_identical=manager.Value("i",0)
+i_extended=manager.Value("i",0)
+i_lock=manager.Lock()
 
 def best_overlap(read1,qual1,read2,qual2):
 	consensus=-1
@@ -203,12 +50,406 @@ def best_overlap(read1,qual1,read2,qual2):
 				consensus=-1
 	return consensus
 
-#ncb=timeit.Timer(gzip_nochunks_byte).timeit(number=1)
+def gzip_nochunks_byte_u():
+	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	for filename in filenames:
+		print(time.strftime("%c"))
+		print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+		print("Loading file: ", filename)
+		with gzip.open(filename, 'rb') as fh:
+			file=fh.read()
+			fh.close()
+		fileStream=io.BytesIO(file)
+		print (time.strftime("%c"))
+		print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+		print("File loaded. Processing")
+		while True:
+			name = fileStream.readline().strip()
+			read = fileStream.readline().strip()
+			fileStream.readline()
+			qual = fileStream.readline().strip()
+			if not (name or read or qual):
+				print (time.strftime("%c"))
+				print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+				print("EOF reached")
+				break
+			if (len(read) == len(qual)):
+				if name in data:
+					s_read = data[name][0]
+					s_qual = data[name][1]
+					if read == s_read:
+						#print(name.decode("UTF-8"),": identical",)
+						pass
+					elif read in s_read:
+						#print(name.decode("UTF-8"),": s_read is longer")
+						pass
+					elif s_read in read:
+						#print(name.decode("UTF-8"),": read is longer, storing")
+						data[name]=(read,qual)
+					else:
+						consensus=best_overlap(read,qual,s_read,s_qual)
+						if consensus == -1:
+							consensus=best_overlap(s_read,s_qual,read,qual)
+						if consensus == -1:
+							print(name.decode("UTF-8"),": error",)
+						else:
+						#	print(name.decode("UTF-8"),": consensus found",)
+							data[name]=(consensus)
+				else:
+					data[name]=(read,qual)
+		del file
+		del fileStream
+		gc.collect()
+	#Write the output to disk
+	print (time.strftime("%c"))
+	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	print("Saving to disk")
+	#print(timeit.Timer(save1).timeit(number=1))
+	print(timeit.Timer(save2).timeit(number=1))
+	#print(timeit.Timer(save3).timeit(number=1))
+	#data={}
+	gc.collect()
+	#Done
+
+def gzip_nochunks_byte_u2():
+	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	for filename in filenames:
+		print(time.strftime("%c"))
+		print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+		print("Loading file: ", filename)
+		with open(filename, "rb") as fh:
+			gzfile = fh.read()
+			fh.close()
+			print (time.strftime("%c"))
+			print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+			print("File loaded. Processing")
+			gzfileStream=io.BytesIO(gzfile)
+			file = gzip.GzipFile(mode="rb", fileobj=gzfileStream)
+			while True:
+				name = file.readline().strip()
+				read = file.readline().strip()
+				file.readline()
+				qual = file.readline().strip()
+				if not (name or read or qual):
+					print (time.strftime("%c"))
+					print("EOF reached")
+					break
+				if (len(read) == len(qual)):
+					if name in error:
+						error.name.append((read,qual))
+					elif name in data:
+						s_read = data[name][0]
+						s_qual = data[name][1]
+						if read == s_read:
+							#print(name.decode("UTF-8"),": identical",)
+							pass
+						elif read in s_read:
+							#print(name.decode("UTF-8"),": s_read is longer")
+							pass
+						elif s_read in read:
+							#print(name.decode("UTF-8"),": read is longer, storing")
+							data[name]=(read,qual)
+						else:
+							consensus=best_overlap(read,qual,s_read,s_qual)
+							if consensus == -1:
+								consensus=best_overlap(s_read,s_qual,read,qual)
+							if consensus == -1:
+								print(name.decode("UTF-8"),": error")
+								if error[name]:
+									error.name.append((read,qual))
+								else:
+									error[name]=[(s_read,s_qual),(read,qual)]
+									data.pop(name)
+							else:
+							#	print(name.decode("UTF-8"),": consensus found")
+								data[name]=(consensus)
+					else:
+						data[name]=(read,qual)
+			del file
+			del gzfileStream
+			
+		gc.collect()
+	#Write the output to disk
+	print (time.strftime("%c"))
+	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	print("Saving to disk")
+	#print(timeit.Timer(save1).timeit(number=1))
+	print(timeit.Timer(save2).timeit(number=1))
+	#print(timeit.Timer(save3).timeit(number=1))
+
+	#data={}
+	gc.collect()
+	#Done
+
+def getChunk(sourceFile, i, cpus):
+	with open(sourceFile, "rb") as fh:
+		size=os.fstat(fh.fileno()).st_size
+		chunksize=round(size/cpus)
+		fh.seek(i*chunksize)
+		print(i*chunksize==fh.tell())
+		return (i*chunksize, fh.read(chunksize))
+
+def safe_readline(byteStream):
+	line=b''
+	#while (line == b'' and byteStream.tell() < byteStream.getbuffer().nbytes):
+	#while (line == b'' and byteStream.tell() < len(byteStream.getbuffer())):
+	while (line == b'' and byteStream.tell() < len(byteStream.getvalue())):
+		line=byteStream.readline().strip()
+	#print(line)
+	return line
+
+
+def processReads(byteString, data, error, lock):
+	with io.BytesIO(byteString) as file:
+		file.seek(0)
+		while file.tell() < len(byteString):
+			'''
+			if file.tell() >= len(byteStream):
+				print(os.getpid(),": EOF by size")
+			'''
+			name = safe_readline(file)
+			read = safe_readline(file)
+			safe_readline(file)
+			qual = safe_readline(file)
+			'''
+			if not (name or read or qual):
+				if name==read==qual==b'':
+					print(os.getpid(),": EOF reached")
+					print("sequences: ",len(data))
+					break
+				else:
+					print("error")
+					exit()
+			'''
+			if (name==b'' or read==b'' or qual==b''):
+				if name==read==qual==b'':
+					print(os.getpid(),": EOF reached with newlines at the end of the file")
+				else:
+					print("Error: read not loaded correctly")
+					exit()
+
+			if (len(read) == len(qual)):
+				with lock:
+					#We need to extract it as a range instead of just the first character to
+					#get a byte string and not an int representing the chararcter.
+					#if name[0:1]!=b"@":
+					#Alternatively we can convert the character into the ASCII int instead.
+					if name[0]!=ord("@"):
+						print(name.decode("utf-8"))
+						print("Something is wrong")
+						exit()
+					if name in error:
+						#print(name.decode("UTF-8"),": error",)
+						error[name].append((read,qual))
+					elif name in data:
+						s_read = data[name][0]
+						s_qual = data[name][1]
+						if read == s_read:
+							#print(name.decode("UTF-8"),": identical",)
+							pass
+						elif read in s_read:
+							#print(name.decode("UTF-8"),": s_read is longer")
+							pass
+						elif s_read in read:
+						#if s_read in read:
+							#print(read)
+							#print(s_read)
+							#print(name.decode("UTF-8"),": read is longer, storing")
+							data[name]=(read,qual)
+						else:
+						#elif (read != s_read) and (read not in s_read):
+							consensus=best_overlap(read,qual,s_read,s_qual)
+							if consensus == -1:
+								consensus=best_overlap(s_read,s_qual,read,qual)
+							if consensus == -1:
+								#print(name.decode("UTF-8"),": error",)
+								if name in error:
+									error[name].append((read,qual))
+								else:
+									error[name]=[(s_read,s_qual),(read,qual)]
+									data.pop(name)
+							else:
+								#print(name.decode("UTF-8"),": consensus found",)
+								data[name]=(consensus)
+					else:
+						#print(name.decode("UTF-8"),": adding new read",)
+						data[name]=(read,qual)
+			else:
+				print("Error: SEQ and QUAL have different lenghts")
+				exit()
+			#print("leaving if (len(read) == len(qual))")
+		#print("leaving while")
+		else: #This else belongs to the while
+			print(os.getpid(),"EOF reached with while")
+	#print("leaving function")
+	return True
+
+
+def gzip_nochunks_byte_u3():
+	for filename in filenames:
+		cpus=30
+		print("Splitting in ",cpus," cpus")
+		with io.BytesIO() as gzfile:
+			with multiprocessing.Pool(cpus) as pool:
+				multiple_results=[]
+				for i in range(cpus+1):
+					print("sending job: ", i)
+					multiple_results.append(pool.apply_async(getChunk,args=(filename,i,cpus)))
+					#pool.apply_async(getChunk,args=(filename,my_shared_list,i,cpus))
+				print("Closing pool")
+				pool.close()
+				print("Joining pool")
+				pool.join()
+			print("Building file")
+			for result in multiple_results:
+				chunk=result.get()
+				gzfile.seek(chunk[0])
+				gzfile.write(chunk[1])
+			c_size = gzfile.seek(0,2)
+			gzfile.seek(0)
+			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
+				print("Estimating compression ratio", end="\r")
+				file.seek(1000000)
+				c_ratio=gzfile.tell()/file.tell()
+				file.seek(0)
+				print("Estimating compression ratio:",round(c_ratio,2))
+				print("Approx. decompressed file: ", round(c_size/c_ratio))
+				print("Decompressing")
+				
+				i=1
+				buffersize=int((c_size/c_ratio)/(cpus))
+				v_block=None
+				print("Chunk size: ",buffersize)
+				
+				with multiprocessing.Pool(cpus) as pool:
+					multiple_results=[]
+					
+					while True:
+						chunk = file.read(buffersize)
+						if chunk == None:
+							print(i, " - EOF - flushing")
+							print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+							print("Error?")
+							break
+						elif len(chunk) < buffersize:
+							if v_block == None:
+								print(i," - File read in one chunk")
+								v_block = chunk
+								print(i, " - block ready - ",file.tell())
+								print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+								print("sending job: ", i)
+								#processReads(v_block, data_manager, error_manager, lock_manager)
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager)))
+								break
+							else:
+								print(i," - Last chunk")
+								v_block += chunk
+								print(i, " - block ready - ",file.tell())
+								print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+								print("sending job: ", i)
+								#processReads(v_block, data_manager, error_manager, lock_manager)
+								multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager)))
+								break
+						elif file.tell() == buffersize:
+							print(i," - Very beginning of the file")
+							v_block = chunk
+						else:
+							x0=0
+							x=chunk.find(b"\n+", x0)
+							#print(x)
+							while True:
+								if x==-1:
+									#no hit means in the middle of a sequence
+									print("still inside a block")
+									v_block += chunk
+									break
+								else:
+									#print("\\n+: ",x)
+									if chunk.rfind(b"\n@",x0,x)==-1:
+										x0=x+1
+										x=chunk.find(b"\n+",x0)
+									else:
+										print("first \\n@ before \\n+:  ",chunk.rfind(b"\n@",x0,x))
+										newblock = chunk.rfind(b"\n@",x0,x)+1
+										v_block += chunk[:newblock]
+										print(i, " - block ready - ",file.tell())
+										print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
+										print("sending job: ", i)
+										#processReads(v_block, data_manager, error_manager, lock_manager)
+										multiple_results.append(pool.apply_async(processReads,args=(v_block, data_manager, error_manager, lock_manager)))
+										v_block = chunk[newblock:]
+										i+=1
+										break
+							print("inner wall exit")
+					for res in multiple_results:
+						res.wait()
+					print("outer wall exit")
+		print("Closing pool")
+		pool.close()
+		print("Joining pool")
+		pool.join()
+		print("LOADED")
+		print(len(data_manager))
+	#Write the output to disk
+	'''
+	with multiprocessing.Pool(3) as pool:
+		pool.map(save4, dict(data),100)
+		print("Closing pool")
+		pool.close()
+		print("Joining pool")
+		pool.join()
+	'''
+
+	print (time.strftime("%c"))
+	print("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	print("Saving to disk")
+	#print(timeit.Timer(save1).timeit(number=1))
+	#print(timeit.Timer(save2).timeit(number=1))
+	#print(timeit.Timer(save3).timeit(number=1))
+	exit()
+	#data={}
+	gc.collect()
+
+def save1():
+	with gzip.open('all_1.fastq.gz', 'wb') as gzfile:
+		for key, value in data.items():
+			gzfile.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
+		gzfile.close()
+
+def save2():
+	print("Building file")
+	with io.BytesIO() as file:
+		for key, value in data.items():
+			file.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
+		print("Writting file")
+		with gzip.open('all_2.fastq.gz', 'wb') as gzfile:
+			gzfile.write(file.getvalue())
+			gzfile.close()
+		file.close()
+	print("Done")
+
+def save3():
+	gzfileStream = io.BytesIO()
+	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
+		for key, value in data.items():
+			gzfile.write(key+b"\n"+value[0]+b"\n+\n"+value[1]+b"\n")
+		gzfile.close()
+		with open('all_3.fastq.gz', 'wb') as fh:
+			fh.write(gzfileStream.getvalue())
+			fh.close()
+
+def save4(iter):
+	print("hjgj: ",len(iter))
+
+ncbu3=timeit.Timer(gzip_nochunks_byte_u3).timeit(number=1)
 ncbu=timeit.Timer(gzip_nochunks_byte_u).timeit(number=1)
+ncbu2=timeit.Timer(gzip_nochunks_byte_u2).timeit(number=1)
 #ch=timeit.Timer(gzip_chunks).timeit(number=1)
 
 #print("ncb=",ncb)
 print("ncbu=",ncbu)
+print("ncbu2=",ncbu2)
+print("ncbu3=",ncbu3)
 #print("ch=",ch)
 
 print (time.strftime("%c"))
