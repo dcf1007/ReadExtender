@@ -13,6 +13,8 @@ import copy
 import ctypes
 import operator
 import inspect
+#from multiprocessing.process import current_process
+#current_process()._config["tempdir"] = "/dev/shm"
 
 print (time.strftime("%c"))
 
@@ -36,6 +38,8 @@ manager = multiprocessing.Manager()
 data_manager = manager.dict()
 error_manager = manager.dict()
 
+lock_manager = manager.Lock()
+locked = multiprocessing.RawValue(ctypes.c_bool, False)
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -102,7 +106,7 @@ def getChunk(sourceFile, i, n_chunks):
 		#Locate the start postition for chunk i
 		fh.seek(i*chunksize)
 		
-		assert i*chunksize==fh.tell(), "The pointer in the file and the start of the chunk relative to sourceFile differ. They should be equal"
+		assert i*chunksize == fh.tell(), "The pointer in the file and the start of the chunk relative to sourceFile differ. They should be equal"
 		return (i*chunksize, fh.read(chunksize))
 
 def safe_readline(byteStream):
@@ -128,14 +132,14 @@ def dedupe(seq, qual, stored_read):
 	#Check if reads are identical. Omit if so.
 	if seq == stored_read[0]:
 		#print("identical",)
-		return (1,stored_read)
-		pass
+		return (1,) #No need to "return (1,stored_read)" as the read is not going to be used
+		#pass
 	
 	#Check if the new read is contained in the stored read. Omit if so.
 	elif seq in stored_read[0]:
 		#print("s_read is longer")
 		return (2,stored_read)
-		pass
+		#pass
 	
 	#Check if the stored read is contained in the new read.
 	elif stored_read[0] in seq:
@@ -148,7 +152,7 @@ def dedupe(seq, qual, stored_read):
 		#read1
 		#----------------
 		#          ---------------
-		#          read2
+		#                    read2
 		consensus = best_overlap(seq,qual,stored_read[0],stored_read[1])
 		
 		#Check if overlap was found
@@ -157,7 +161,7 @@ def dedupe(seq, qual, stored_read):
 			#read2
 			#----------------
 			#          ---------------
-			#          read1
+			#                    read1
 			consensus=best_overlap(stored_read[0],stored_read[1],seq,qual)
 		
 		#Check if overlap was found
@@ -171,12 +175,11 @@ def dedupe(seq, qual, stored_read):
 			return (2,consensus)
 
 
-def processReads(byteString, s_data, s_error, arr_index = -1):
+def processReads(byteString, s_data, s_error, shared_arr_index = -1):
 	private_counter = [0,0,0,0]
-	previous_count = 0
 
 	#Counter contains an array("added", "identical", "extended", "error")
-	if(arr_index == -1):
+	if(shared_arr_index == -1):
 		print("Counter not initialised. Exiting")
 		exit()
 
@@ -197,12 +200,18 @@ def processReads(byteString, s_data, s_error, arr_index = -1):
 		
 		#Execute until we reach the EOF
 		while file.tell() < len(byteString): 
+			#Wait if a lock is acquired which means shared data and shared error are being updated
+			while locked.value == True:
+				time.sleep(0.1)
+				#pass
+			
 			#TODO: Explanation of internal counter. Basically to avoid bottleneck by writting too often to a shared object
 			if(sum(private_counter) % 1000 == 0):
-				shared_arr[arr_index] = private_counter[0]
-				shared_arr[arr_index + 1] = private_counter[1]
-				shared_arr[arr_index + 2] = private_counter[2]
-				shared_arr[arr_index + 3] = private_counter[3]
+				shared_arr[shared_arr_index] += private_counter[0]
+				shared_arr[shared_arr_index + 1] += private_counter[1]
+				shared_arr[shared_arr_index + 2] += private_counter[2]
+				shared_arr[shared_arr_index + 3] += private_counter[3]
+				private_counter = [0,0,0,0]
 
 			#FASTQ code is organised in groups of 4 NON-EMPTY lines.
 			#3rd line is useless and ignored.
@@ -224,27 +233,28 @@ def processReads(byteString, s_data, s_error, arr_index = -1):
 					print("Error: read not loaded correctly")
 					exit()
 				'''
-			
-			#Wait if a lock is acquired which means shared data and shared error are being updated
-			
-			
 			#Check if the read name is in the error dictionary.
 			#If the read name is in the error dict means previous conflict with the
 			#read, so add the new read there and do not process.
 			if name in p_error:
 				p_error[name].append((seq,qual))
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 				private_counter[3] += 1 #error
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 			elif name in s_error:
 				#print(name.decode("UTF-8"),": error",)
-				#OBS! We do not copy s_error therefore error MUS BE APPEND to s_error in the merge
+				#OBS! We do not copy s_error therefore error MUST BE APPEND to s_error in the merge
 				p_error[name]=[(seq,qual)]
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 				private_counter[3] += 1 #error
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
+			'''
+			#Check if SEQ and QUAL have different lengths
+			elif (len(seq) != len(qual)):
+				#As in this case it does not mean a discrepance between sequences but a problem in
+				#The source file, if the read is present in the shared_data, it will stay and this
+				#Read will simply be ignored and not counted at all.
+				#print("Error: SEQ and QUAL have different lenghts.")
+			else:
+			'''
 			#Only process if SEQ and QUAL are well-formed
-			elif (len(seq) == len(qual)): 
+			if (len(seq) == len(qual)):
 				#Verify the name starts with @ as a FASTQ read should
 				#We need to extract it as a range instead of just the first character to
 				#get a byte string and not an int representing the chararcter.
@@ -273,9 +283,15 @@ def processReads(byteString, s_data, s_error, arr_index = -1):
 						#print("DEDUPE shared")
 						deduped = dedupe(seq, qual, s_read)
 						if deduped:
-							#Only store the read if it has been extended. If identical, leave the shared copy.
+							#Only store the read if it has been extended. In this case, the shared item will be erased.
+							#If identical, leave the shared copy and add nothing to p_data.
 							if(deduped[0] == 2):
 								p_data[name]=deduped[1]
+								try:
+									s_data.pop(name)
+								except Exception:
+									print(name, "Has already been erased by another process. Continue")
+									pass
 							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 							private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
 							#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
@@ -302,27 +318,48 @@ def processReads(byteString, s_data, s_error, arr_index = -1):
 						private_counter[3] += 1 #error
 						#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 						
-			#If SEQ and QUAL have different lengths
-			else:
-				#Transfer read to error dict and make sure is erased from data dict too
-				#print("Error: SEQ and QUAL have different lenghts.")
-				p_error[name]=[(seq,qual)]
-				#data.pop(name)
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
-				private_counter[3] += 1 #error
-				#print("Line ", inspect.currentframe().f_lineno, " - ", shared_arr[:])
 			#print("leaving if (len(seq) == len(qual))")
 		#When while reaches EOF
-		else:
+		#else:
 			#print(os.getpid(),"EOF reached with while")
-			pass
+			#pass
 	#print("leaving function")
-	
+	#Save in the shared dictionary, for which we have to lock it.
+	#Ideally no duplicate items must be found and the saving process should be smooth.
+	#In the case there were ducplicates in the source file which ended up in different processes
+	#We will dedupe them and add a single entry into s_data
+	with lock_manager: #Keep other processes from saving to s_data
+		locked.value = True #Make other processes wait before continuing reading s_data
+		#TODO: The saving code goes in here
+		#1. Create intersection between shared and private
+		duplicate_names = s_data.keys() & p_data.keys()
+		#2. Dedupe whatever is in the intersection and update in the private
+		for name in duplicate_names:
+			deduped = dedupe(p_data[name][0], p_data[name][0], s_data[name])
+			if deduped:
+				#Only rewrite the read if it has been extended. If identical, do nothing.
+				if(deduped[0] == 2):
+					p_data[name]=deduped[1]
+				private_counter[deduped[0]] += 1 #dedupe() will tell if it is 1 (identical) or 2 (extended)
+			else:
+				#TODO this should be added to the existing list
+				p_error[name]=[(seq,qual), p_read]
+				private_counter[3] += 1 #error
+			private_counter[0] -= 1 #Substract the read from added as it has been added to either identical, extended or error
+		#3. Update the shared with the private data and update the counter
+		s_data.update(p_data)
+		shared_arr[shared_arr_index] += private_counter[0]
+		shared_arr[shared_arr_index + 1] += private_counter[1]
+		shared_arr[shared_arr_index + 2] += private_counter[2]
+		shared_arr[shared_arr_index + 3] += private_counter[3]
+		p_data.clear()
+		locked.value = False
 	return True
 
-def init_process(shared_arr_):
-	global shared_arr
+def init_process(shared_arr_, locked_):
+	global shared_arr, locked
 	shared_arr = shared_arr_ # must be inherited, not passed as an argument
+	locked = locked_
 
 def gzip_nochunks_byte_u3():
 	global arr_index
@@ -368,11 +405,12 @@ def gzip_nochunks_byte_u3():
 				print("Approx. decompressed file: ", round(c_size/c_ratio))
 				print("Decompressing and processing")
 				i=1
+				arr_index=0
 				buffersize=int((c_size/c_ratio)/(cpus))
 				v_block=None
 				print("Chunk size: ",buffersize)
 				print (time.strftime("%c"))
-				with multiprocessing.Pool(cpus) as pool:
+				with multiprocessing.Pool(processes=cpus, initializer=init_process, initargs=(shared_arr,locked,)) as pool:
 					multiple_results=[]
 					
 					while True:
