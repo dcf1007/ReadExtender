@@ -485,7 +485,7 @@ class updateShared:
 		self.u_data = dict()
 		self.u_error = dict()
 		self._updater = threading.Thread(target=self._updateShared, name="updateShared")
-		self._updater.setDaemon(True)
+		#self._updater.setDaemon(True)
 		self._updater.start()
 		#print("updateshared start stop")
 		
@@ -496,9 +496,12 @@ class updateShared:
 			sprint("Empty: ", q_data.empty(), " Size: ", end="\r")
 			time.sleep(0.1)
 		#print("Queues empty")
-		#print("trying to stop")
+		sprint("Trying to stop updater", end="\r")
 		self._running = False
-		self._updater.join()
+		#self._updater.join()
+		while self._updater.isAlive():
+			sprint("Trying to stop updater", end="\r")
+			time.sleep(0.1)
 		sprint("Releasing memory: Updater", end="\r")
 		gc.collect()
 		sprint("Done: Updater", end="\r")
@@ -587,7 +590,7 @@ class updateShared:
 				sprint("U_files left: ", q_data.qsize(), end="\r")
 			sprint("U_files left: ", q_data.qsize(), end="\r")
 			time.sleep(1)
-		#print(threading.currentThread().getName(), " Leaving")
+		sprint(threading.currentThread().getName(), " Leaving")
 		return
 
 
