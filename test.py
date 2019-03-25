@@ -85,13 +85,17 @@ def count(cpus, messages):
 				last_end = message[0]
 	return
 
-def gzCompress(nameList):
+def gzCompress(slice_i, slice_f):
 	global s_data
-	gzfileStream = io.BytesIO()
-	with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-		for name in nameList:
-			gzfile.write(name+b"\n"+s_data[name][0]+b"\n+\n"+s_data[name][1]+b"\n")
-	return gzfileStream.getvalue()
+	with io.BytesIO() as gzfileStream:
+		with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
+			for index in range(slice_i, slice_f):
+				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
+		return gzfileStream.getvalue()
+
+def init_gzCompress(s_data_keys_):
+	global s_data_keys
+	s_data_keys = s_data_keys_
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -780,9 +784,11 @@ if __name__ == '__main__':
 	counter = multiprocessing.Process(target=count, args=(cpus,messages))
 	counterActive = multiprocessing.RawValue(ctypes.c_bool, False)
 	counter.start()
-
+	
+	updater = updateShared()
+	
 	s_data = dict()
-	s_data_keys = list()
+	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, [b''])
 	s_error = dict()
 	
 	q_data = multiprocessing.Queue()
@@ -833,15 +839,14 @@ if __name__ == '__main__':
 					
 					sprint (time.strftime("%c"))
 					
-					counterActive.value = True
-					
-					updater = updateShared()
 					updater.start()
 					
 					for chunk in decompressChunks(gzfile):
 						#sprint("Sending job ", len(multiple_results)+1, end="\r")
 						#Send a new process for the chunk
 						multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
+						if counterActive.value == False:
+							counterActive.value = True
 					sprint(len(multiple_results), " jobs succesfully sent")
 					#print("Closing pool")
 					pool.close()
@@ -892,48 +897,63 @@ if __name__ == '__main__':
 					gc.collect()
 		sprint("File processed succesfully")
 		previous_filenames.append(filename)
+	
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
-	with multiprocessing.Pool(cpus) as pool:
+	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, s_data.keys())
+	ks = len(s_data_keys)
+	sprint("S_data_keys: ", len(s_data_keys))
+	
+	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
 		multiple_results = []
-		s_data_keys = list(s_data.keys())
-		ks = len(s_data_keys)
-		sprint("S_data_keys: ", len(s_data_keys))
-		tot = 0
+		
 		for i in range(cpus):
-			slice = s_data_keys[(i*ks)//cpus:((i+1)*ks)//cpus]
-			multiple_results.append(pool.apply_async(gzCompress,args=(slice,)))
-			tot += len(slice)
-			del slice
-		sprint(tot)
+			multiple_results.append(pool.apply_async(gzCompress,args=((i*ks)//cpus, ((i+1)*ks)//cpus)))
 		sprint("Closing pool")
 		pool.close()
-		sprint("Joining pool")
-		pool.join()
-		with open(args.output, 'wb') as fh:
-			for res in multiple_results:
-				#print(gzip.decompress(res.get()))
-				fh.write(res.get())
-			fh.close()
-		s_data_keys = list()
+
+		sprint("Waiting for results to be ready")
+					
+		pFinished = [0]*len(multiple_results)
 		
-		output = pathlib.Path(args.output)
-		error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
-		if(os.path.isdir(error_dir) == False):
-			os.mkdir(error_dir)
-		error_files = dict()
-		for filename in previous_filenames:
-			error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
-		for name in s_error:
-			for filename in s_error[name]:
-				for read in s_error[name][filename]:
-					error_files[filename].write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
-		for filename in error_files:
-			error_files[filename].close()
+		with open(args.output, 'wb') as fh:
+			while True:
+				for index, res in enumerate(multiple_results):
+					if((res.ready()==True) and (pFinished[index] == 0)):
+						fh.write(res.get())
+						pFinished[index] = int(res.ready())
+						sprint(sum(pFinished), "/", len(pFinished), end="\r")
+				if sum(pFinished) == len(multiple_results):
+					sprint(sum(pFinished), "/", len(pFinished), " DONE")
+					pool.join()
+					break
+				else:
+					time.sleep(1)
+			fh.close()
+		s_data_keys = None
+		
+		#sprint(readsCounter[:])
+		del multiple_results
+		
+	output = pathlib.Path(args.output)
+	error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
+	if(os.path.isdir(error_dir) == False):
+		os.mkdir(error_dir)
+	error_files = dict()
+	for filename in previous_filenames:
+		error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
+	for name in s_error:
+		for filename in s_error[name]:
+			for read in s_error[name][filename]:
+				error_files[filename].write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
+	for filename in error_files:
+		error_files[filename].close()
 	
 	s_data.clear()
 	s_error.clear()
-	
+	updater.stop()
+	counterActive.value = False
+	counter.terminate()
 	sprint (time.strftime("%c"))
 	#sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
@@ -943,4 +963,4 @@ if __name__ == '__main__':
 	#data={}
 	#gc.collect()
 
-	#sprint (time.strftime("%c"))
+	sprint (time.strftime("%c"))
