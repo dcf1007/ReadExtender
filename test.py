@@ -89,30 +89,32 @@ def best_overlap(read1,qual1,read2,qual2):
 		
 		#Check if the subString of Read1 is the beginning of Read2
 		if read2.startswith(read1[r1_offset:]):
-			#Reset r1_offset to the first hit of the query in r1.
-			#If there is one match only, it shouldn't change.
-			r1_offset=read1.find(read1[r1_offset:])
 			
-			#Calculate r2_offset to the last hit of the query in r2.
+			#Calculate r2_offset as the last hit of the query in r2 (the rightmost hit).
+			r2_offset = read2.rfind(read1[r1_offset:])
+			
 			#If there is only one match its value should be 0.
-			r2_offset=read2.rfind(read1[r1_offset:])
+			#Otherwise the query is multiple times in r2.
+			if (r2_offset != 0) or (read2.count(read1[r1_offset:]) != 1):
+				return consensus
 			
-			#Check whether there are multiple hits for the query.
-			#If so, abort due to ambiguity
-			if (read1.count(read1[r1_offset:]) == 1) and (read2.count(read1[r1_offset:]) == 1):
-				#As we have taken the leftmost hit in r1 and the rightmost hit in r2,
-				#the sequence after the hit in r1 and before the hit in r2 will only
-				#be the same in the case a true consensus is found.
-				#OBS! Probably redundant
-				if read1[r1_offset:] == read2[:r2_offset + len(read1)-r1_offset]:
-					#print("Only one hit of the query, proceed")
-					#OBS!: read1[r1_offset:] == len(read1)-r1_offset
-					consensus = (read1+read2[len(read1)-r1_offset:], qual1+qual2[len(read1)-r1_offset:])
-					#print(read1.ljust(len(consensus[0]),b"-"))
-					#print(read2.rjust(len(consensus[0]),b"-"))
-					break
-			else:
-				consensus=-1
+			#r1_offset has to be equal to the first hit of the query in r1
+			#if there is one match only, otherwise it is repeated.
+			if (r1_offset != read1.find(read1[r1_offset:])) or (read1.count(read1[r1_offset:]) != 1):
+				return consensus
+
+			#As we have taken the leftmost hit in r1 and the rightmost hit in r2,
+			#the sequence after the hit in r1 and before the hit in r2 will only
+			#be the same in the case a true consensus is found.
+			#OBS! Probably redundant?
+			if read1[r1_offset:] == read2[:r2_offset + len(read1)-r1_offset]:
+				#print("Only one hit of the query, proceed")
+				#OBS!: read1[r1_offset:] == len(read1)-r1_offset
+				consensus = (read1+read2[len(read1)-r1_offset:], qual1+qual2[len(read1)-r1_offset:])
+				#print(read1.ljust(len(consensus[0]),b"-"))
+				#print(read2.rjust(len(consensus[0]),b"-"))
+				return consensus
+				
 	return consensus
 
 def getChunk(sourceFile, i, n_chunks):
@@ -182,7 +184,7 @@ def dedupe(seq, qual, stored_read):
 		#                    read2
 		consensus = best_overlap(seq,qual,stored_read[0],stored_read[1])
 		
-		#Check if overlap was found
+		#Check if overlap was not found
 		if consensus == -1:
 			#Try to find overlap:
 			#read2
@@ -191,7 +193,7 @@ def dedupe(seq, qual, stored_read):
 			#                    read1
 			consensus=best_overlap(stored_read[0],stored_read[1],seq,qual)
 		
-		#Check if overlap was found
+		#Check if overlap was not found
 		if consensus == -1:
 			return None
 			
