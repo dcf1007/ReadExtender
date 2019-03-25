@@ -14,6 +14,10 @@ import ctypes
 import operator
 import inspect
 import math
+import pickle
+import zlib
+import sys
+
 #from multiprocessing.process import current_process
 #current_process()._config["tempdir"] = "/dev/shm"
 
@@ -326,8 +330,8 @@ def processReads(byteString, procID = None):
 	readsCounter[procID + 1] += private_counter[1]
 	readsCounter[procID + 2] += private_counter[2]
 	readsCounter[procID + 3] += private_counter[3]
-		
-	return p_data, p_error
+	
+	return pickle.dumps((p_data, p_error), protocol=4)
 
 def init_processReads(readsCounter_):
 	global readsCounter
@@ -371,8 +375,8 @@ def gzip_nochunks_byte_u3():
 			with gzip.GzipFile(mode='rb', fileobj=gzfile) as file:
 				print("Estimating compression ratio", end="\r")
 				#Seek the first 10MB (10485760 bytes) of uncompressed data
-				#file.seek(10485760)
-				file.seek(1000000)
+				file.seek(10485760)
+				#file.seek(1000000)
 				
 				#Read the position of the pointers in the compressed and uncompressed data to estimate
 				#the compression ratio
@@ -589,7 +593,7 @@ def gzip_nochunks_byte_u3():
 					u_data={}
 					u_error={}
 					for index, res in enumerate(multiple_results):
-						p_data, p_error = res.get()
+						p_data, p_error = pickle.loads(res.get())
 						#TODO: The saving code goes in here
 						#1. Create intersection between shared and private
 						duplicate_names = u_data.keys() & p_data.keys()
