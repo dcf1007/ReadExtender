@@ -19,6 +19,28 @@ import zlib
 import sys
 import pathlib
 import threading
+import csv
+
+def get_size(obj, seen=None):
+	"""Recursively finds size of objects"""
+	size = sys.getsizeof(obj)
+	if seen is None:
+		seen = set()
+	obj_id = id(obj)
+	if obj_id in seen:
+		return 0
+	# Important mark as seen *before* entering recursion to gracefully handle
+	# self-referential objects
+	seen.add(obj_id)
+	if isinstance(obj, dict):
+		size += sum([get_size(v, seen) for v in obj.values()])
+		size += sum([get_size(k, seen) for k in obj.keys()])
+	elif hasattr(obj, '__dict__'):
+		size += get_size(obj.__dict__, seen)
+	elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+		size += sum([get_size(i, seen) for i in obj])
+	return size
+
 
 def sprint(*args, end="\r\n"):
 	global messages
@@ -413,27 +435,7 @@ def processReads(byteString):
 	
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
-	
-	def get_size(obj, seen=None):
-		"""Recursively finds size of objects"""
-		size = sys.getsizeof(obj)
-		if seen is None:
-			seen = set()
-		obj_id = id(obj)
-		if obj_id in seen:
-			return 0
-		# Important mark as seen *before* entering recursion to gracefully handle
-		# self-referential objects
-		seen.add(obj_id)
-		if isinstance(obj, dict):
-			size += sum([get_size(v, seen) for v in obj.values()])
-			size += sum([get_size(k, seen) for k in obj.keys()])
-		elif hasattr(obj, '__dict__'):
-			size += get_size(obj.__dict__, seen)
-		elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
-			size += sum([get_size(i, seen) for i in obj])
-		return size
-	
+		
 	q_data.put(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
 	#q_data.put(pickle.dumps((p_data, p_error), protocol=4))
 	
@@ -493,10 +495,10 @@ class updateShared:
 		#print("updateshared stop stop")
 
 	def getData(self):
-		return self.u_data
+		return self.u_data.items()
 		
 	def getErrors(self):
-		return self.u_error
+		return self.u_error.items()
 	
 	def length(self):
 		return (len(self.u_data), len(self.u_error))
@@ -509,7 +511,6 @@ class updateShared:
 		#TODO: Pass the values "properly"
 		self._running = True
 		
-		global s_data, s_error
 		global q_data, q_error
 		
 		#print(threading.currentThread().getName(), " Launched")
@@ -796,7 +797,7 @@ if __name__ == '__main__':
 	
 	sprint (time.strftime("%c"))
 	
-	previous_filenames = []
+	previous_filenames = set()
 	for filepath in filepaths:
 		filename = pathlib.Path(filepath).name
 		sprint("Loading ",filename," in RAM using ",cpus," processes")
@@ -882,21 +883,58 @@ if __name__ == '__main__':
 					sprint("Length: ", updater.length())
 					s_data.update(updater.getData())
 					
-					for Ename in updater.getErrors():
-						if Ename in s_data:
-							for previous_filename in previous_filenames:
-								s_error.setdefault(Ename,dict()).setdefault(previous_filename,list()).append(s_data[Ename])
-							s_data.pop(Ename)
-							readsCounter[(cpus*5) + 3] += 1 #error
-							readsCounter[(cpus*5)] -= 1 #Substract the read from added
-							
-						s_error.setdefault(Ename,dict()).setdefault(filename, list()).extend(updater.u_error[Ename])
+					for Ename, Ereads in updater.getErrors():
+						#If Ename in s_data then it cannot be in s_error.
 						
+						if Ename in s_data:
+							#Transfer the read to s_error
+							s_error.setdefault(Ename,dict()).setdefault(s_data[Ename],set()).update(previous_filenames)
+							s_data.pop(Ename)
+							
+							#The Eread(s) in updater.getErrors() needs to be added to s_error too.
+							for Eread in Ereads:
+								s_error[Ename].setdefault(Eread, set()).add(filename)
+							
+							#error increases in 1 for the transfered read from s_data. The one in s_read was already taken into account
+							readsCounter[(cpus*5) + 3] += 1
+							
+							#Substract the read from added as we transfered it to error
+							readsCounter[(cpus*5)] -= 1
+						
+						elif Ename in s_error:
+							#If Ename in s_error we need to check if the read already existed
+							for Eread in Ereads:
+								deduped = None
+								for s_Eread in s_error[Ename].keys():
+									deduped = dedupe(Eread[0], Eread[1], s_Eread)
+									if deduped:
+										#If Eread is either identical or contained in s_Eread
+										if(deduped[0] == 1):
+											s_error[Ename][s_Eread].add(filename)
+										#If Eread and s_Eread have been extended.
+										elif(deduped[0] == 2):
+											#Add the deduped read to the s_error with all the filenames from the s_Eread
+											s_error[Ename].setdefault(deduped[1], set()).update(s_error[Ename][s_Eread])
+											#Erased s_Eread as it has been superceeded by the deduped one
+											s_error[Ename].pop(s_Eread)
+											#Add the filename for Eread to s_error
+											s_error[Ename][deduped[1]].add(filename)
+										else:
+											print("Error!!")
+											exit()
+										break
+								if deduped == None:
+									#Eread is totally new for Ename, add it
+									s_error[Ename].setdefault(Eread, set()).add(filename)
+						else:
+							#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
+							#Add a totally new entry to s_error
+							for Eread in Ereads:
+								s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
 					sprint("Shared dictionary updated")
-					
 					gc.collect()
 		sprint("File processed succesfully")
-		previous_filenames.append(filename)
+		previous_filenames.add(filename)
 	
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
@@ -906,13 +944,14 @@ if __name__ == '__main__':
 	
 	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
 		multiple_results = []
+		sprint("Compressing the results")
 		
 		for i in range(cpus):
 			multiple_results.append(pool.apply_async(gzCompress,args=((i*ks)//cpus, ((i+1)*ks)//cpus)))
 		sprint("Closing pool")
 		pool.close()
 
-		sprint("Waiting for results to be ready")
+		sprint("Waiting for the compressed results to be ready")
 					
 		pFinished = [0]*len(multiple_results)
 		
@@ -934,18 +973,35 @@ if __name__ == '__main__':
 		
 		#sprint(readsCounter[:])
 		del multiple_results
-		
+	
+	sprint("Generating error files")
 	output = pathlib.Path(args.output)
 	error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
 	if(os.path.isdir(error_dir) == False):
 		os.mkdir(error_dir)
 	error_files = dict()
+	
+	with open(error_dir + ".csv", 'w', newline='') as csvfile:
+		spamwriter = csv.writer(csvfile, delimiter=';',	quotechar='"', quoting=csv.QUOTE_MINIMAL)
+		spamwriter.writerow(["Read name", "Read"]+list(previous_filenames))
+		for Ename, Ereads in s_error.items():
+			for Eread, Efiles in Ereads.items():
+				row = [Ename.decode("UTF-8"), Eread[0].decode("UTF-8")]
+				for filename in previous_filenames:
+					if filename in Efiles:
+						row.append("X")
+					else:
+						row.append(" ")
+				spamwriter.writerow(row)
+	
 	for filename in previous_filenames:
 		error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
-	for name in s_error:
-		for filename in s_error[name]:
-			for read in s_error[name][filename]:
-				error_files[filename].write(name+b"\n"+read[0]+b"\n+\n"+read[1]+b"\n")
+	
+	for Ename, Ereads in s_error.items():
+			for Eread, Efiles in Ereads.items():
+				for Efile in Efiles:
+					error_files[Efile].write(Ename+b"\n"+Eread[0]+b"\n+\n"+Eread[1]+b"\n")
+				
 	for filename in error_files:
 		error_files[filename].close()
 	
@@ -955,7 +1011,7 @@ if __name__ == '__main__':
 	counterActive.value = False
 	counter.terminate()
 	sprint (time.strftime("%c"))
-	#sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
+	sprint("RAM: ",round(py.memory_info().rss/1024/1024/1024,2))
 	#print("Saving to disk")
 	#print(timeit.Timer(save1).timeit(number=1))
 	#print(timeit.Timer(save2).timeit(number=1))
