@@ -574,7 +574,7 @@ class updateShared:
 		return
 
 
-def decompressChunks(grugru):
+def decompressChunks(rawValue):
 	'''
 	This function works around the structure of a FASTQ read to know whether it is inside a read or not.
 	A fastq read is structured in blocks of 4 lines as follows:
@@ -598,103 +598,99 @@ def decompressChunks(grugru):
 	v_block and start a new v_block
 
 	'''
-
-	f_size = len(grugru.value)
-	sprint("File size ", f_size)
-	
 	#We use ceil to round up the size of the buffer and avoid the creation of cpus+1 chunks
 	#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 	#can always happen that we underestimate the size and a cpus+1 chunks are generated.
 	#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
-	if (f_size / cpus) > 1024*1024*1024:
-		buffersize = 1024*1204*1024
-	else:
-		buffersize = round(f_size / cpus)
-	sprint("Using chunk size of: ", buffersize)
-	
-	sprint("Processing")
-	#Initialise v_block
-
-	offset_0 = 0
-	offset = buffersize
-	
-	np = re.compile(b"\n+").search
-	nr = re.compile(b"\n@").search
-	while True:
-		#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
-		#If there was a previous v_block, this is the last chunk of the file
-		#If it was the last chunk, it will be taken care later in the code
-		if offset_0 == 0 and offset > f_size:
-			sprint("File read in one chunk")
-			yield (offset_0,f_size)
-			return
-		elif f_size > offset_0 and offset > f_size:
-			sprint("EOF reached")
-			yield (offset_0,f_size)
-			return
-		#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
-		#as the chunk may be ending in the middle of a sequence, and that's not good.
+	#file = io.BytesIO(rawValue)
+	with io.BytesIO(rawValue.value) as file:
+		f_size = file.seek(0,2)
+		sprint("File size: ", f_size)
+		file.seek(0)
+		
+		if (f_size / cpus) > 3*1024*1024*1024:
+			buffersize = 3*1024*1204*1024
 		else:
+			buffersize = math.ceil(f_size / cpus)
+			
+		sprint("Using chunk size of: ", buffersize)
+		
+		print("Processing")
+		#Initialise v_block
 
-			#Find the first line that starts with "+" which will be our seed and store its position
-			t0=time.time()
-			seed = grugru.value.find(b"\n+", offset)
-			sprint(time.time()-t0)
-						
-			t0=time.time()
-			sprint(np(grugru.value, offset))
-			sprint(time.time()-t0)
-			#This loop allows to scan the chunk until the boundaries of the read have been determined
-			while True:
-				#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
-				if seed == -1:
-					print("still inside a block?!?!?", offset_0, ":", offset, "/", f_size)
-					#Append the chunk to the existing v_block
-					#v_block += chunk
-					break
-				
-				#If a seed was found, we need to find the boundaries of the read where the seed is
-				else:
-					#print("Seed (\\n+) found at: ", seed)
-					
-					#Find the first line that starts with "@" between the offset and the seed which will be the start of
-					#a new read and store its position
-					newblock = grugru.value.rfind(b"\n@", offset, seed)
-					
-					#If there was no line starting with "@" between the offset and the seed
-					if newblock == -1:
-						#Set the offset one character after the seed position to start the seed search again
-						offset = seed + 1
-						
-						#Search for a new seed position
-						seed = grugru.value.find(b"\n+", offset)
-						
-					#If there was a line starting with "@" between the offset and the seed
-					else:
-						#print("First line starting with @ before the seed: ", newblock)
-						
-						#Exclude the newline character from the newblock position. At the moment, newblock contains the
-						#newline character used in the search, which doesn't correspond to the beginning of the new read
-						#and needs to be excluded in the new v_block.
-						yield (offset_0, newblock)
-						
-						offset_0 = newblock + 1
-						
-						offset = offset_0 + buffersize
-						#Append the chunk until the newblock position to the existing v_block
-						#v_block += chunk[:newblock]
-						#size=sys.getsizeof(v_block)
-						#sprint("Size u: ", size)
-						#results_z = zlib.compress(v_block,1)
-						#sprint("Size c: ", sys.getsizeof(results_z))
-						#sprint("Ratio: ", round(sys.getsizeof(results_z)/size,2))
-						
-						#sprint(" |- block ready - ", file.tell(), end = "\r")
-						#print("----\n",v_block[:10],"...",v_block[-10:],"\n----")
-						break
+		offset_0 = 0
+		offset = buffersize
+		peek_size = 10*1024
+		chunks = list()
+		while True:
+			#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
+			#If there was a previous v_block, this is the last chunk of the file
+			#If it was the last chunk, it will be taken care later in the code
+			if offset_0 == 0 and offset > f_size:
+				print("File read in one chunk")
+				chunks.append((offset_0,f_size))
+				return chunks
+			elif f_size > offset_0 and offset > f_size:
+				print("EOF reached")
+				chunks.append((offset_0,f_size))
+				return chunks
+			#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
+			#as the chunk may be ending in the middle of a sequence, and that's not good.
+			else:
+
+				#Find the first line that starts with "+" which will be our seed and store its position
+				print("Seeking offset ", offset)
+				file.seek(offset)
+				print("Peeking 10MB data")
+				peek_buffer = file.read(peek_size)
+				print(len(peek_buffer))
+				print("Searching the + line")
+				seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
 							
-				#print("inner wall exit")
-	#sprint("100%")
+				#This loop allows to scan the chunk until the boundaries of the read have been determined
+				while True:
+					#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
+					if seed == 0:
+						print("+ line not found in peek data, extending peek")
+						#Append the chunk to the existing v_block
+						#v_block += chunk
+						print("Peeking 10MB more of data")
+						peek_buffer += file.read(peek_size)
+						print("Searching the + line")
+						seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
+						print(len(peek_buffer))
+					
+					#If a seed was found, we need to find the boundaries of the read where the seed is
+					else:
+						print("+ found at: ", seed)
+						
+						#Find the first line that starts with "@" between the offset and the seed which will be the start of
+						#a new read and store its position
+						newblock = peek_buffer[:seed].rfind(b"\n@") + 1
+						
+						#If there was no line starting with "@" between the offset and the seed
+						if newblock == 0:
+							print("@ not found in peek data. Moving offset to seed point")
+							#Set the offset one character after the seed position to start the seed search again
+							offset += seed
+							
+						#If there was a line starting with "@" between the offset and the seed
+						else:
+							print("@ found at: ", newblock)
+							
+							#Exclude the newline character from the newblock position. At the moment, newblock contains the
+							#newline character used in the search, which doesn't correspond to the beginning of the new read
+							#and needs to be excluded in the new v_block.
+							offset += newblock
+							print("transfering the results: ", (offset_0,offset))
+							chunks.append((offset_0,offset))
+							print("Loading new offsets")
+							offset_0 = offset
+							offset = offset_0 + buffersize
+						break
+								
+					#print("inner wall exit")
+		#sprint("100%")
 	return
 			
 if __name__ == '__main__':
@@ -739,6 +735,7 @@ if __name__ == '__main__':
 		filename = pathlib.Path(filepath).name
 		sprint("Loading ",filename," in RAM using ",cpus," processes")
 		with io.BytesIO() as gzfile:
+			t0=time.time()
 			with multiprocessing.Pool(cpus+1) as pool:
 				multiple_results=[]
 				for i in range(cpus+1):
@@ -762,7 +759,7 @@ if __name__ == '__main__':
 							sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
 					
 					if sum(pFinished) == len(pFinished):
-						sprint("File loaded")
+						sprint("File loaded in ", time.time()-t0)
 						#print("Joining pool")
 						pool.join()
 						break
@@ -772,12 +769,20 @@ if __name__ == '__main__':
 				del multiple_results
 			
 			sprint("Decompressing file")
+			t0=time.time()
 			gzfile.seek(0)
 			with gzip.open(gzfile, 'rb') as f_in:
 				with io.BytesIO() as f_out:
 					shutil.copyfileobj(f_in, f_out)
 					loadedFASTQ.value = f_out.getvalue()
-			sprint("File decompressed")
+			sprint("File decompressed in ", time.time()-t0)
+			
+			t = time.time()
+			with gzip.open(filepath, 'rb') as f_in:
+				with io.BytesIO() as f_out:
+					print(shutil.copyfileobj(f_in, f_out))
+					loadedFASTQ.value = f_out.getvalue()
+			print(time.time()-t)
 			
 			#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 			#We pass the array to store the reads counted with an initialiser function so the different
@@ -788,12 +793,13 @@ if __name__ == '__main__':
 				
 				sprint (time.strftime("%c"))
 				
-				updater.start()
+				#updater.start()
 				
 				sprint("RAM: ", py.memory_info().rss)
 				for chunk in decompressChunks(loadedFASTQ):
-					#sprint("Sending job ", len(multiple_results)+1, end="\r")
+					#sprint("Sending job ", len(multiple_results)+1)
 					#Send a new process for the chunk
+					sprint(chunk)
 					#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
 					#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
 					multiple_results.append(pool.apply_async(processReads,args=(chunk,)))
