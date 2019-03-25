@@ -18,6 +18,7 @@ import pickle
 import zlib
 import sys
 import pathlib
+import threading
 
 def sprint(*args, end="\r\n"):
 	global messages
@@ -378,7 +379,12 @@ def processReads(byteString):
 	
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
-	results = pickle.dumps((p_data, p_error), protocol=4)
+	
+	for dict_item in p_data.items():
+		q_data.put(dict_item)
+	
+	for dict_item in p_error.items():
+		q_error.put(dict_item)
 	
 	del p_data
 	del p_error
@@ -386,14 +392,74 @@ def processReads(byteString):
 	
 	with readsCounterLock:
 		readsCounter[procID] = 0
-		
-	return results
+	
+	#print(procID, " Finished")
+	
+	return True
 
-def init_processReads(readsCounter_, readsCounterLock_):
+def init_processReads(readsCounter_, readsCounterLock_, q_data_, q_error_):
 	global readsCounter, readsCounterLock
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
+	q_data = q_data_
+	q_error = q_error_
+
+
+class updateShared:
 	
+	_updater = None
+	
+	_running = False
+	
+	def start(self):
+		if self._updater:
+			if(self._updater.isAlive() == True):
+				return
+		self._updater = threading.Thread(target=self._updateShared, name="updateShared")
+		self._updater.setDaemon(True)
+		self._updater.start()
+		
+	def stop(self):
+		print("trying to stop")
+		self._running = False
+
+	def _updateShared(self):
+		#TODO: Pass the values "properly"
+		self._running = True
+		
+		global s_data, s_error
+		global q_data, q_error
+		
+		p_data = dict()
+		p_error = dict()
+		
+		u_data = dict()
+		u_error = dict()
+		
+		print(threading.currentThread().getName(), " Launched")
+		
+		while self._running == True:
+			print(self._running)
+			ne=0
+			while not q_error.empty():
+				if ne == 0:
+					ne = 1
+					print("not empty: ", q_error.qsize(), "     ")
+				p_error.update((q_data.get(),))
+			
+			ne=0
+			while not q_data.empty():
+				if ne == 0:
+					ne = 1
+					print("not empty: ", q_data.qsize(), "     ")
+				p_data.update((q_data.get(),))
+				
+			print("empty")
+			ne = 0
+			time.sleep(1)
+		
+		print(threading.currentThread().getName(), " Leaving")
+			
 if __name__ == '__main__':
 
 	#from multiprocessing.process import current_process
@@ -419,7 +485,10 @@ if __name__ == '__main__':
 
 	s_data = dict()
 	s_error = dict()
-
+	
+	q_data = multiprocessing.Queue()
+	q_error = multiprocessing.Queue()
+	
 	#lock_manager = manager.Lock()
 	#locked = multiprocessing.RawValue(ctypes.c_bool, False)
 	
@@ -496,13 +565,16 @@ if __name__ == '__main__':
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
-				with multiprocessing.Pool(processes=cpus, initializer=init_processReads, initargs=(readsCounter,readsCounterLock)) as pool:
+				with multiprocessing.Pool(processes=cpus, initializer=init_processReads, initargs=(readsCounter,readsCounterLock, q_data, q_error)) as pool:
 					
 					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
 					
 					counter = multiprocessing.Process(target=count, args=(cpus,messages))
 					counter.start()
+					
+					updater = updateShared()
+					updater.start()
 					
 					#This loop allows to scan the whole file using chunks of defined size
 					while True:
@@ -652,13 +724,12 @@ if __name__ == '__main__':
 					pool.close()
 					sprint("Waiting for results to be ready")
 					pFinished = [0]*len(multiple_results)
-					u_data={}
-					u_error={}
+					
 					while True:
 						for index, res in enumerate(multiple_results):
 							if((res.ready()==True) and (pFinished[index] == 0)):
 								#p_data, p_error = pickle.loads(zlib.decompress(res.get()))
-								p_data, p_error = pickle.loads(res.get())
+								#p_data, p_error = pickle.loads(res.get())
 								#TODO: The saving code goes in here
 								#0a. If a read is in p_data and u_error, transfer it to p_error
 								duplicate_Enames = u_error.keys() & p_data.keys()
