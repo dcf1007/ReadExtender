@@ -113,13 +113,11 @@ def gzCompress(slice_i, slice_f):
 	global s_data
 	with io.BytesIO() as gzfileStream:
 		with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-			for index in range(slice_i, slice_f):
-				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
+			for index, item in enumerate(s_data.items()):
+				if index >= slice_i and index < slice_f:
+					gzfile.write(item[0]+b"\n"+item[1][0]+b"\n+\n"+item[1][1]+b"\n")
 		return gzfileStream.getvalue()
 
-def init_gzCompress(s_data_keys_):
-	global s_data_keys
-	s_data_keys = s_data_keys_
 
 def best_overlap(read1,qual1,read2,qual2):
 	'''
@@ -467,13 +465,12 @@ def processReads(chunk):
 	
 	return True
 
-def init_processReads(FASTQ_chunks_, readsCounter_, readsCounterLock_, q_data_, q_error_):
+def init_processReads(FASTQ_chunks_, readsCounter_, readsCounterLock_, q_data_):
 	#print("init_processReads start")
-	global readsCounter, readsCounterLock, FASTQ_chunks, q_data, q_error
+	global readsCounter, readsCounterLock, FASTQ_chunks, q_data
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
 	q_data = q_data_
-	q_error = q_error_
 	FASTQ_chunks = FASTQ_chunks_
 	#print("init_processReads stop") 
 
@@ -502,15 +499,15 @@ class updateShared:
 		
 	def stop(self):
 		#print("updateshared stop start")
-		#print("Waiting for the queues to be empty")
-		while not (q_error.empty() and q_data.empty()):
+		sprint("Waiting for the queues to be empty")
+		while q_data.empty() == False:
 			#print(int(q_error.qsize() + q_data.qsize()))
 			time.sleep(0.1)
 		#print("Queues empty")
 		#print("trying to stop")
 		self._running = False
 		self._updater.join()
-		#print("updateshared stop stop")
+		sprint("Updater stopped")
 
 	def getData(self):
 		return self.u_data.items()
@@ -529,7 +526,7 @@ class updateShared:
 		#TODO: Pass the values "properly"
 		self._running = True
 		
-		global q_data, q_error
+		global q_data
 		
 		#print(threading.currentThread().getName(), " Launched")
 		
@@ -655,101 +652,92 @@ def decompressChunks(filepath):
 			peek_size = 10*1024
 			chunks = list()
 			peek_buffer = b''
-			while True:
-				#If chunk length is smaller than buffer size it's either the last chunk or the whole file read at once 
-				#If there was a previous v_block, this is the last chunk of the file
-				#If it was the last chunk, it will be taken care later in the code
-				if offset_0 == 0 and offset > f_size:
-					
-					#as the f_size is approximate, read all to reach the end of the file
-					#empty first whatever is left into the peek_buffer
-					sprint("transfering the results: ", (offset_0,file.tell()), end="\r")
-					chunks.append(peek_buffer + file.read())
-					content.close()
-					sprint("File read in one chunk")
-					return chunks
-				elif f_size > offset_0 and (offset >= f_size or offset_0+len(peek_buffer) >= f_size):
-					sprint("transfering the results: ", (offset_0,file.tell()), end="\r")
-					chunks.append(peek_buffer + file.read())
-					content.close()
-					sprint("EOF reached")
-					return chunks
-				#If it's not at the beginning or the end of the file, we need to define the boundaries of the v_block
-				#as the chunk may be ending in the middle of a sequence, and that's not good.
-				else:
-
-					#Find the first line that starts with "+" which will be our seed and store its position
-					sprint("Clearing content", end="\r\n")
-					content.seek(0)
-					content.truncate()
-					sprint("f_size: ", f_size, " Offset0: ", offset_0, " Offset: ", offset, " Peek length: ", len(peek_buffer))
-					sprint(round(offset_0*100/f_size), "% Seeking offset ", offset, end="\r\n")
-					content.write(peek_buffer)
-					content.write(file.read(offset - offset_0 - len(peek_buffer)))
-					sprint(file.tell(), "=", offset, "=", content.tell(), end="\r\n")
-					sprint("Peeking 10MB data", end="\r\n")
-					peek_buffer = file.read(peek_size)
-					#sprint(len(peek_buffer))
-					sprint("Searching the + line", end="\r\n")
-					seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-								
-					#This loop allows to scan the chunk until the boundaries of the read have been determined
-					while True:
-						#If no seed was found, this should not happen because we are scanning through the whole file and we are before EOF
-						if seed == 0:
-							sprint("+ line not found in peek data, extending peek", end="\r")
-							#Append the chunk to the existing v_block
-							#v_block += chunk
-							sprint("Peeking 10MB more of data", end="\r")
-							peek_buffer += file.read(peek_size)
-							sprint("Searching the + line", end="\r")
-							seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-							sprint(len(peek_buffer))
-						
-						#If a seed was found, we need to find the boundaries of the read where the seed is
-						else:
-							sprint("+ found at: ", seed, end="\r")
-							
-							#Find the first line that starts with "@" between the offset and the seed which will be the start of
-							#a new read and store its position
-							newblock = peek_buffer[:seed].rfind(b"\n@") + 1
-							
-							#If there was no line starting with "@" between the offset and the seed
-							if newblock == 0:
-								sprint("@ not found in peek data. Moving offset to seed point", end="\r")
-								#Set the offset one character after the seed position to start the seed search again
-								sprint("Updating offset", end="\r")
-								offset += seed
-								sprint("Updating rawvalue", end="\r")
-								content.write(peek_buffer[:seed])
-								sprint("Updating peek_buffer", end="\r")
-								peek_buffer = peek_buffer[seed:]
-								sprint("Searching the + line", end="\r")
-								seed = peek_buffer.find(b"\n+") + 1 #The "+1" is needed to locate the seed in the "+" and include the "\n"
-								#sprint(len(peek_buffer))
-								
-							#If there was a line starting with "@" between the offset and the seed
+			with io.BytesIO() as content:
+				while True:
+					sprint("Start while 1")
+					if offset_0 == 0 and offset >= f_size:
+						chunks.append(peek_buffer + file.read())
+						content.close()
+						sprint("File read in one chunk")
+						return chunks
+					else:
+						sprint(" + Erasing content")
+						content.seek(0)
+						content.truncate()
+						sprint(" + Emptying peek in content")
+						sprint(" + old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+						sprint(" + old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						content.write(peek_buffer[:buffersize])
+						sprint(" + new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						peek_buffer = peek_buffer[buffersize:]
+						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+						sprint(" + offset_0: ", offset_0, " offset: ", offset)
+						sprint(" + old tell: ", file.tell(), "/", f_size)
+						sprint(" + Reading ", (offset - offset_0) - content.tell())
+						content.write(file.read((offset - offset_0) - content.tell()))
+						sprint(" + new tell: ", file.tell(), "/", f_size)
+						sprint(" + new content2: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+						peek_buffer += file.read(peek_size - len(peek_buffer))
+						sprint(" + new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+						sprint(" + new tell2: ", file.tell(), "/", f_size)
+						seed = peek_buffer.find(b'\n+')+1
+						sprint(" + new seed: ", seed)
+						while f_size > file.tell() and len(peek_buffer) > 0:
+							sprint(" + Start while2")
+							if seed == 0:
+								sprint(" + - seed 0")
+								sprint(" + - - old tell: ", file.tell(), "/", f_size)
+								sprint(" + - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+								peek_buffer += file.read(peek_size)
+								sprint(" + - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+								sprint(" + - - new tell: ", file.tell(), "/", f_size)
+								seed = peek_buffer.find(b'\n+')+1
+								sprint(" + - - new seed: ", seed)
 							else:
-								sprint("@ found at: ", newblock, end="\r")
-								#Exclude the newline character from the newblock position. At the moment, newblock contains the
-								#newline character used in the search, which doesn't correspond to the beginning of the new read
-								#and needs to be excluded in the new v_block.
-								sprint("Updating offset", end="\r")
-								offset += newblock
-								sprint("Updating rawvalue", end="\r")
-								content.write(peek_buffer[:newblock])
-								sprint("Updating peek_buffer", end="\r")
-								peek_buffer = peek_buffer[newblock:]
-								
-								sprint("transfering the results: ", (offset_0,offset), end="\r")
-								chunks.append(content.getvalue())
-								sprint("Loading new offsets", end="\r")
-								offset_0 = offset
-								offset = offset_0 + buffersize
-								break
-									
-						#print("inner wall exit")
-			#sprint("100%")
+								sprint(" + - seed found: ", seed)
+								newblock = peek_buffer[:seed].rfind(b'\n@')+1
+								sprint(" + - - new block: ", newblock)
+								if newblock == 0:
+									sprint(" + - - newblock 0")
+									sprint(" + - - - old offset: ", offset)
+									offset += seed
+									sprint(" + - - - new offset: ", offset)
+									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									content.write(peek_buffer[:seed])
+									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									peek_buffer = peek_buffer[seed:]
+									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									seed = peek_buffer.find(b'\n+')+1
+									sprint(" + - - new seed: ", seed)
+								else:
+									sprint(" + - - newblock found: ", newblock)
+									sprint(" + - - - old offset: ", offset)
+									offset += newblock
+									sprint(" + - - - new offset: ", offset)
+									sprint(" + - - - old content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									content.write(peek_buffer[:newblock])
+									sprint(" + - - - new content: ", content.getvalue()[:11], " ... ", content.getvalue()[-10:])
+									sprint(" + - - - old peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									peek_buffer = peek_buffer[newblock:]
+									sprint(" + - - - new peek: ", peek_buffer[:11], " ... ", peek_buffer[-10:])
+									chunks.append(content.getvalue())
+									sprint(" + - - - chunks: ", len(chunks))
+									sprint(" + - - - old offset_0: ", offset_0)
+									offset_0 = offset
+									sprint(" + - - - new offset_0: ", offset_0)
+									sprint(" + - - - old offset: ", offset)
+									offset = offset_0 + buffersize
+									sprint(" + - - - new offset: ", offset)
+									break
+						else:
+							sprint("EOF reached")
+							content.write(peek_buffer)
+							content.write(file.read())
+							chunks.append(content.getvalue())
+							content.close()
+							sprint("chunks: ", len(chunks))
+							return chunks
 	return
 			
 if __name__ == '__main__':
@@ -785,7 +773,6 @@ if __name__ == '__main__':
 	s_error = dict()
 	
 	q_data = multiprocessing.Queue()
-	q_error = multiprocessing.Queue()
 	
 	sprint (time.strftime("%c"))
 	
@@ -798,7 +785,7 @@ if __name__ == '__main__':
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
-		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(FASTQ_chunks, readsCounter, readsCounterLock, q_data, q_error)) as pool:
+		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(FASTQ_chunks, readsCounter, readsCounterLock, q_data)) as pool:
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
 			
@@ -904,16 +891,13 @@ if __name__ == '__main__':
 	
 	#Write the output to disk
 	sprint("S_data: ", len(s_data))
-	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, s_data.keys())
-	ks = len(s_data_keys)
-	sprint("S_data_keys: ", len(s_data_keys))
 	
-	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
+	with multiprocessing.Pool(cpus) as pool:
 		multiple_results = []
 		sprint("Compressing the results")
 		
 		for i in range(cpus):
-			multiple_results.append(pool.apply_async(gzCompress,args=((i*ks)//cpus, ((i+1)*ks)//cpus)))
+			multiple_results.append(pool.apply_async(gzCompress,args=((i*len(s_data))//cpus, ((i+1)*len(s_data))//cpus)))
 		
 		sprint("Closing pool")
 		pool.close()
