@@ -592,8 +592,8 @@ def decompressChunks(gzfile):
 		#As we are estimating the compression ratio with the first 10MB of uncompressed data it
 		#can always happen that we underestimate the size and a cpus+1 chunks are generated.
 		#If the chunk would be more than 1GB, limit it to 1GB to avoid pickling issues
-		if (c_size / (c_ratio * cpus)) > 1073741824:
-			buffersize = 1073741824
+		if (c_size / (c_ratio * cpus)) > 1024*1024*1024:
+			buffersize = 1024*1204*1024
 		else:
 			buffersize = round(c_size / (c_ratio * cpus))
 		sprint("Using chunk size of: ", buffersize)
@@ -707,7 +707,7 @@ def decompressChunks(gzfile):
 				#This loop allows to scan the chunk until the boundaries of the read have been determined
 				while True:
 					#If no seed was found, we are in the middle of a read and therefore we must continue extending v_block
-					if seed==-1:
+					if seed == -1:
 						#print("still inside a block")
 						
 						#Append the chunk to the existing v_block
@@ -811,7 +811,10 @@ if __name__ == '__main__':
 				#print("Closing pool")
 				sprint(len(multiple_results), " jobs succesfully sent")
 				pool.close()
+				
 				pFinished = [0]*len(multiple_results)
+				sprint("Loaded: ", round(100*sum(pFinished)/len(pFinished)),"%", end="\r")
+				
 				while True:
 					for index, res in enumerate(multiple_results):
 						if((res.ready() == True) and (pFinished[index] == 0)):
@@ -834,7 +837,7 @@ if __name__ == '__main__':
 				#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 				#We pass the array to store the reads counted with an initialiser function so the different
 				#processes get it by inheritance and not as an argument
-				with multiprocessing.Pool(processes=cpus, initializer=init_processReads, initargs=(readsCounter,readsCounterLock, q_data, q_error)) as pool:
+				with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, q_data, q_error)) as pool:
 					#Initialise the list that will contain the results of all the processes
 					multiple_results=[]
 					
@@ -857,6 +860,7 @@ if __name__ == '__main__':
 					sprint("Waiting for results to be ready")
 					
 					pFinished = [0]*len(multiple_results)
+					sprint(sum(pFinished), "/", len(pFinished), end="\r")
 					
 					while True:
 						for index, res in enumerate(multiple_results):
@@ -879,10 +883,11 @@ if __name__ == '__main__':
 					
 					counterActive.value = False
 					
-					sprint("Updating the shared dictionary")
+					sprint("Updating the shared dictionaries")
 					sprint("Length: ", updater.length())
+					sprint("Updating valid data"
 					s_data.update(updater.getData())
-					
+					sprint("Updating errors")
 					for Ename, Ereads in updater.getErrors():
 						#If Ename in s_data then it cannot be in s_error.
 						
@@ -895,7 +900,7 @@ if __name__ == '__main__':
 							for Eread in Ereads:
 								s_error[Ename].setdefault(Eread, set()).add(filename)
 							
-							#error increases in 1 for the transfered read from s_data. The one in s_read was already taken into account
+							#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
 							readsCounter[(cpus*5) + 3] += 1
 							
 							#Substract the read from added as we transfered it to error
@@ -931,7 +936,7 @@ if __name__ == '__main__':
 							#Add a totally new entry to s_error
 							for Eread in Ereads:
 								s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
-					sprint("Shared dictionary updated")
+					sprint("Shared dictionaries updated")
 					gc.collect()
 		sprint("File processed succesfully")
 		previous_filenames.add(filename)
@@ -948,12 +953,14 @@ if __name__ == '__main__':
 		
 		for i in range(cpus):
 			multiple_results.append(pool.apply_async(gzCompress,args=((i*ks)//cpus, ((i+1)*ks)//cpus)))
+		
 		sprint("Closing pool")
 		pool.close()
 
 		sprint("Waiting for the compressed results to be ready")
 					
 		pFinished = [0]*len(multiple_results)
+		sprint(sum(pFinished), "/", len(pFinished), end="\r")
 		
 		with open(args.output, 'wb') as fh:
 			while True:
