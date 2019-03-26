@@ -459,9 +459,9 @@ def processReads(chunk, minoverlap=25):
 	
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
-		
-	updaterQueue.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
-	#updaterQueue.put(pickle.dumps((p_data, p_error), protocol=4))
+	
+	#updaterQueue.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
+	updaterQueue.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
 	del p_error
@@ -551,8 +551,8 @@ class updateShared:
 			while updaterQueue.empty() == False:
 				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 				#p_data, p_error = updaterQueue.get()
-				p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
-				#p_data, p_error = pickle.loads(updaterQueue.get())
+				#p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
+				p_data, p_error = pickle.loads(updaterQueue.get())
 				
 				for e_name, e_reads in p_error.items():
 					#0 Add e_name to self.u_error
