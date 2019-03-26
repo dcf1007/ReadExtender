@@ -496,7 +496,7 @@ class updateShared:
 	
 	def start(self):
 		#print("updateshared start")
-		if self._running = True:
+		if self._running == True:
 			print(threading.currentThread().getName(), " is already running")
 			return
 		else:
@@ -534,6 +534,12 @@ class updateShared:
 	
 	def size(self):
 		return (sys.getsizeof(self.u_data), sys.getsizeof(self.u_error))
+	
+	def save(self, filepath)
+		pickle.dump((self.u_data, self.u_error), filepath, protocol=4)
+	
+	def load(self, filepath)
+		self.u_data, self.u_error = pickle.load(filepath)
 	
 	def _updateShared(self):
 		#print("_updateshared start")
@@ -1031,6 +1037,3 @@ if __name__ == '__main__':
 	
 	sprint (time.strftime("%c"))
 	sprint("RAM: ", humanbytes(py.memory_info().rss))
-	
-
-
