@@ -130,9 +130,9 @@ def gzCompress(slice_i, slice_f):
 			for index in range(slice_i, slice_f):
 				file.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
 			file.close()
-		sprint("Waiting to write into the file")
+		sprint("Waiting to write into the file", end="\r")
 		with outputLock:
-			sprint("Writing into the file")
+			sprint("Writing into the file", end="\r")
 			with open(outputFile, 'ab') as gzfile:
 				gzfile.write(gzfileStream.getvalue())
 				gzfile.close()
