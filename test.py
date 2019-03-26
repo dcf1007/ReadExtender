@@ -536,10 +536,12 @@ class updateShared:
 		return (sys.getsizeof(self.u_data), sys.getsizeof(self.u_error))
 	
 	def save(self, filepath):
-		pickle.dump((self.u_data, self.u_error), filepath, protocol=4)
+		with open(filepath, 'wb') as file:
+			pickle.dump((self.u_data, self.u_error), file, protocol=4)
 	
 	def load(self, filepath):
-		self.u_data, self.u_error = pickle.load(filepath)
+		with open(filepath, 'rb') as file:
+			self.u_data, self.u_error = pickle.load(file)
 	
 	def _updateShared(self):
 		#print("_updateshared start")
