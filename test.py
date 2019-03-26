@@ -1,3 +1,4 @@
+import contextlib
 import shutil
 import zlib
 import gzip 
@@ -950,8 +951,11 @@ if __name__ == '__main__':
 	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, list(s_data.keys()))
 	
 	sprint("Compressing the results")
-	
+	with contextlib.suppress(FileNotFoundError):
+		output.unlink()
+			
 	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(str(output), outputLock)) as pool:
+
 		multiple_results = []
 		
 		for i in range(cpus):
