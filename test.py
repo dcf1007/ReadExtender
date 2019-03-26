@@ -537,11 +537,11 @@ class updateShared:
 		return (sys.getsizeof(self.u_data), sys.getsizeof(self.u_error))
 	
 	def save(self, filepath):
-		with open(filepath, 'wb') as file:
+		with gzip.open(filepath, 'wb', 1) as file:
 			pickle.dump((self.u_data, self.u_error), file, protocol=4)
 	
 	def load(self, filepath):
-		with open(filepath, 'rb') as file:
+		with gzip.open(filepath, 'rb') as file:
 			self.u_data, self.u_error = pickle.load(file)
 	
 	def _updateShared(self):
@@ -910,13 +910,13 @@ if __name__ == '__main__':
 				#sprint(readsCounter[:])
 				del multiple_results
 			
+			counterActive.value = False
 			sprint("Releasing memory: Main thread", end="\r")
 			gc.collect()
 			sprint("Done: Main thread", end="\r")
 			updater.stop()
 			sprint("Saving state for ", input_filename)
 			updater.save(working_dir + "/" + input_filename + ".updict")
-			counterActive.value = False
 		
 		sprint("Updating the shared dictionaries")
 		sprint("Length: ", updater.length())
