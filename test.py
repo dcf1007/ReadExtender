@@ -69,58 +69,66 @@ def sprint(*args, end="\r\n"):
 	
 	return True
 
-def count(cpus, messages):
+def count(cpus, messages, logFile):
 	#TODO: transform this into a singleton
 	global readsCounter
 	global counterActive
 	last_end = "\r\n"
 	columns, rows = os.get_terminal_size(0)
 	
-	while True:
-		
-		if counterActive.value == True:
+	with open(logFile, 'at') as logWriter:
+	
+		while True:
 			
-			start_time = time.time()
-			
-			if(cpus > 1):
-				start_reads = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
-			else:
-				start_reads = sum(readsCounter[:]) - readsCounter[0]
-
-			while counterActive.value == True:
+			if counterActive.value == True:
+				
+				start_time = time.time()
+				
 				if(cpus > 1):
-					reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
-					reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
-					reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
-					reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
-					reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
+					start_reads = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
 				else:
-					reads_added = readsCounter[1]
-					reads_identical = readsCounter[2]
-					reads_extended = readsCounter[3]
-					reads_error = readsCounter[4]
-					reads_total = sum(readsCounter[:]) - readsCounter[0]
-				
-				if messages.empty() == False:
-					if last_end == "\r":
-						print("\033[1A\033[K", end = "")
+					start_reads = sum(readsCounter[:]) - readsCounter[0]
+
+				while counterActive.value == True:
+					if(cpus > 1):
+						reads_added = sum(operator.itemgetter(*range(1,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-4]
+						reads_identical = sum(operator.itemgetter(*range(2,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-3]
+						reads_extended = sum(operator.itemgetter(*range(3,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-2]
+						reads_error = sum(operator.itemgetter(*range(4,len(readsCounter)-4,5))(readsCounter)) + readsCounter[len(readsCounter)-1]
+						reads_total = sum(readsCounter[:]) - sum(operator.itemgetter(*range(0,len(readsCounter)-4,5))(readsCounter))
 					else:
-						print("\033[K", end = "")
-				
-					while messages.empty() == False:
-						message = messages.get()
-						print("\033[K", end = "")
-						print(message[1], end = message[0], flush = True)
-						last_end = message[0]
-					if last_end == "\r":
-						print("")
-				print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s", end="\r")
-		else:			
-			while messages.empty() == False:
-				message = messages.get()
-				print("\033[K", end = "")
-				print(message[1], end = message[0], flush = True)
-				last_end = message[0]
+						reads_added = readsCounter[1]
+						reads_identical = readsCounter[2]
+						reads_extended = readsCounter[3]
+						reads_error = readsCounter[4]
+						reads_total = sum(readsCounter[:]) - readsCounter[0]
+					
+					if messages.empty() == False:
+						if last_end == "\r":
+							print("\033[1A\033[K", end = "")
+						else:
+							print("\033[K", end = "")
+					
+						while messages.empty() == False:
+							message = messages.get()
+							print("\033[K", end = "")
+							print(message[1], end = message[0], flush = True)
+							last_end = message[0]
+							if message[0] != "\r":
+								logWriter.write(message[1])
+								logWriter.flush()
+						if last_end == "\r":
+							print("")
+					print("Tot: ", reads_total,"Added: ", reads_added," Iden: ", reads_identical," Ext: ", reads_extended," Err: ", reads_error, "Speed: ", round((reads_total - start_reads)/(time.time()-start_time)), " reads/s", end="\r")
+			else:			
+				while messages.empty() == False:
+					message = messages.get()
+					print("\033[K", end = "")
+					print(message[1], end = message[0], flush = True)
+					last_end = message[0]
+					if message[0] != "\r":
+						logWriter.write(message[1]+message[0])
+						logWriter.flush()
 	return
 
 def gzCompress(slice_i, slice_f):
@@ -542,7 +550,7 @@ class updateShared:
 			sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 			while updaterQueue.empty() == False:
 				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
-				#name, read = updaterQueue.get()
+				#p_data, p_error = updaterQueue.get()
 				p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
 				#p_data, p_error = pickle.loads(updaterQueue.get())
 				
@@ -787,26 +795,12 @@ if __name__ == '__main__':
 	buffersize = args.buffersize
 	filepaths = args.filepaths
 	
-	
 	messages = multiprocessing.Queue()
-	
-	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
-	readsCounterLock = multiprocessing.Lock()
-	
-	counterActive = multiprocessing.RawValue(ctypes.c_bool, False)
-	counter = multiprocessing.Process(target=count, args=(cpus,messages))
-	counter.daemon=True
-	counter.start()
-	
-	updaterQueue = multiprocessing.Queue()
-	updater = updateShared()
-	
-	s_data = dict()
-	s_data_keys = None
-	s_error = dict()
 	
 	outputLock = multiprocessing.Lock()
 	output = pathlib.Path(args.output)
+	with contextlib.suppress(FileNotFoundError):
+		output.unlink()
 	output_dir = str(output.parent)
 	if(os.path.isdir(output_dir) == False):
 		os.mkdir(output_dir)
@@ -824,6 +818,25 @@ if __name__ == '__main__':
 	if(os.path.isdir(error_dir) == False):
 		os.mkdir(error_dir)
 	logFile = working_dir + "/" + output_filename + ".log"
+	with contextlib.suppress(FileNotFoundError):
+		pathlib.Path(logFile).unlink()
+	
+	
+	
+	readsCounter = multiprocessing.RawArray(ctypes.c_int,[0]*((cpus*5) + 4))
+	readsCounterLock = multiprocessing.Lock()
+	
+	counterActive = multiprocessing.RawValue(ctypes.c_bool, False)
+	counter = multiprocessing.Process(target=count, args=(cpus,messages, logFile))
+	counter.daemon=True
+	counter.start()
+	
+	updaterQueue = multiprocessing.Queue()
+	updater = updateShared()
+	
+	s_data = dict()
+	s_data_keys = None
+	s_error = dict()
 	
 	sprint (time.strftime("%c"))
 	
@@ -951,8 +964,6 @@ if __name__ == '__main__':
 	s_data_keys = multiprocessing.RawArray(ctypes.c_char_p, list(s_data.keys()))
 	
 	sprint("Compressing the results")
-	with contextlib.suppress(FileNotFoundError):
-		output.unlink()
 			
 	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(str(output), outputLock)) as pool:
 
