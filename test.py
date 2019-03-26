@@ -460,8 +460,8 @@ def processReads(chunk, minoverlap=25):
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 	
-	#updaterQueue.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
-	updaterQueue.put(pickle.dumps((p_data, p_error), protocol=4))
+	updaterQueue.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
+	#updaterQueue.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
 	del p_error
@@ -496,10 +496,15 @@ class updateShared:
 	
 	def start(self):
 		#print("updateshared start")
-		if self._updater:
-			if(self._updater.isAlive() == True):
-				print(threading.currentThread().getName(), " is already running")
-				return
+		if self._running = True:
+			print(threading.currentThread().getName(), " is already running")
+			return
+		else:
+			if self._updater:
+				if(self._updater.isAlive() == True):
+					print(threading.currentThread().getName(), " is still running but shouldn't be")
+					print("Trying to stop Updater")
+					self._updater.join()
 		self.u_data = dict()
 		self.u_error = dict()
 		self._updater = threading.Thread(target=self._updateShared, name="updateShared")
@@ -516,14 +521,7 @@ class updateShared:
 		#print("Queues empty")
 		sprint("Trying to stop updater", end="\r")
 		self._running = False
-		#self._updater.join()
-		while self._updater.isAlive():
-			sprint("Trying to stop updater", end="\r")
-			time.sleep(0.1)
-		sprint("Releasing memory: Updater", end="\r")
-		gc.collect()
-		sprint("Done: Updater", end="\r")
-		sprint("Updater stopped")
+		#sprint("Updater stopped")
 
 	def getData(self):
 		return self.u_data.items()
@@ -551,8 +549,8 @@ class updateShared:
 			while updaterQueue.empty() == False:
 				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 				#p_data, p_error = updaterQueue.get()
-				#p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
-				p_data, p_error = pickle.loads(updaterQueue.get())
+				p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
+				#p_data, p_error = pickle.loads(updaterQueue.get())
 				
 				for e_name, e_reads in p_error.items():
 					#0 Add e_name to self.u_error
@@ -608,7 +606,7 @@ class updateShared:
 				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 			sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 			time.sleep(1)
-		sprint(threading.currentThread().getName(), " Leaving")
+		sprint("Updater stopped")
 		return
 
 
