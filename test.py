@@ -124,19 +124,26 @@ def count(cpus, messages):
 
 def gzCompress(slice_i, slice_f):
 	global s_data
-	with io.BytesIO() as gzfileStream:
-		with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as gzfile:
-			for index in range(slice_i, slice_f):
-				gzfile.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
-			gzfile.close()
-		sprint("Releasing memory: gzCompress", end="\r")
-		gc.collect()
-		sprint("Done: gzCompress", end="\r")
-		return gzfileStream.getvalue()
-
-def init_gzCompress(s_data_keys_):
 	global s_data_keys
-	s_data_keys = s_data_keys_
+	with io.BytesIO() as gzfileStream:
+		with gzip.GzipFile(mode='wb', fileobj=gzfileStream) as file:
+			for index in range(slice_i, slice_f):
+				file.write(s_data_keys[index]+b"\n"+s_data[s_data_keys[index]][0]+b"\n+\n"+s_data[s_data_keys[index]][1]+b"\n")
+			file.close()
+		with outputLock:
+			with open(outputFile, 'ab') as gzfile:
+				gzfile.write(gzfileStream.getvalue())
+				gzfile.close()
+		gzfileStream.close()
+	sprint("Releasing memory: gzCompress", end="\r")
+	gc.collect()
+	sprint("Done: gzCompress", end="\r")
+	return 
+
+def init_gzCompress(outputFile_, outputLock_):
+	global outputFile, outputLock
+	outputLock = outputLock_
+	outputFile = outputFile_
 
 
 def best_overlap(read1,qual1,read2,qual2, minoverlap=25):
@@ -442,8 +449,8 @@ def processReads(chunk, minoverlap=25):
 	#print(readsCounter[:])
 	#results = zlib.compress(pickle.dumps((p_data, p_error), protocol=4))
 		
-	q_data.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
-	#q_data.put(pickle.dumps((p_data, p_error), protocol=4))
+	updaterQueue.put_nowait(zlib.compress(pickle.dumps((p_data, p_error), protocol=4),1))
+	#updaterQueue.put(pickle.dumps((p_data, p_error), protocol=4))
 	
 	del p_data
 	del p_error
@@ -458,12 +465,12 @@ def processReads(chunk, minoverlap=25):
 	
 	return True
 
-def init_processReads(readsCounter_, readsCounterLock_, q_data_):
+def init_processReads(readsCounter_, readsCounterLock_, updaterQueue_):
 	#print("init_processReads start")
-	global readsCounter, readsCounterLock, FASTQ_chunks, q_data
+	global readsCounter, readsCounterLock, FASTQ_chunks, updaterQueue
 	readsCounter = readsCounter_ # must be inherited, not passed as an argument
 	readsCounterLock = readsCounterLock_
-	q_data = q_data_
+	updaterQueue = updaterQueue_
 	#print("init_processReads stop") 
 
 
@@ -492,8 +499,8 @@ class updateShared:
 	def stop(self):
 		#print("updateshared stop start")
 		sprint("Waiting for the queues to be empty")
-		while q_data.empty() == False:
-			sprint("Empty: ", q_data.empty(), " Size: ", end="\r")
+		while updaterQueue.empty() == False:
+			sprint("Empty: ", updaterQueue.empty(), " Size: ", end="\r")
 			time.sleep(0.1)
 		#print("Queues empty")
 		sprint("Trying to stop updater", end="\r")
@@ -524,17 +531,17 @@ class updateShared:
 		#TODO: Pass the values "properly"
 		self._running = True
 		
-		global q_data
+		global updaterQueue
 		
 		#print(threading.currentThread().getName(), " Launched")
 		
 		while self._running == True:
-			sprint("U_files left: ", q_data.qsize(), end="\r")
-			while q_data.empty() == False:
-				sprint("U_files left: ", q_data.qsize(), end="\r")
-				#name, read = q_data.get()
-				p_data, p_error = pickle.loads(zlib.decompress(q_data.get()))
-				#p_data, p_error = pickle.loads(q_data.get())
+			sprint("U_files left: ", updaterQueue.qsize(), end="\r")
+			while updaterQueue.empty() == False:
+				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
+				#name, read = updaterQueue.get()
+				p_data, p_error = pickle.loads(zlib.decompress(updaterQueue.get()))
+				#p_data, p_error = pickle.loads(updaterQueue.get())
 				
 				for e_name, e_reads in p_error.items():
 					#0 Add e_name to self.u_error
@@ -587,8 +594,8 @@ class updateShared:
 				sprint("Releasing memory: Updater", end="\r")
 				gc.collect()
 				sprint("Done: Updater", end="\r")
-				sprint("U_files left: ", q_data.qsize(), end="\r")
-			sprint("U_files left: ", q_data.qsize(), end="\r")
+				sprint("U_files left: ", updaterQueue.qsize(), end="\r")
+			sprint("U_files left: ", updaterQueue.qsize(), end="\r")
 			time.sleep(1)
 		sprint(threading.currentThread().getName(), " Leaving")
 		return
@@ -788,15 +795,32 @@ if __name__ == '__main__':
 	counter.daemon=True
 	counter.start()
 	
+	updaterQueue = multiprocessing.Queue()
 	updater = updateShared()
-	
-	FASTQ_chunks = None
 	
 	s_data = dict()
 	s_data_keys = None
 	s_error = dict()
 	
-	q_data = multiprocessing.Queue()
+	outputLock = multiprocessing.Lock()
+	output = pathlib.Path(args.output)
+	output_dir = str(output.parent)
+	if(os.path.isdir(output_dir) == False):
+		os.mkdir(output_dir)
+	output_fileext = ''.join(output.suffixes)
+	if "gz" in output_fileext:
+		sprint("Gzip file detected")
+	elif output_fileext == "":
+		sprint("no output file extension, exiting")
+		exit()
+	output_filename = output.name[:(-len(output_fileext))]
+	working_dir = output_dir + "/" + output.name[:(-len(''.join(output.suffixes)))]
+	if(os.path.isdir(working_dir) == False):
+		os.mkdir(working_dir)
+	error_dir = working_dir + "/" + "error_reads"
+	if(os.path.isdir(error_dir) == False):
+		os.mkdir(error_dir)
+	logFile = working_dir + "/" + output_filename + ".log"
 	
 	sprint (time.strftime("%c"))
 	
@@ -807,7 +831,7 @@ if __name__ == '__main__':
 		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
 		#We pass the array to store the reads counted with an initialiser function so the different
 		#processes get it by inheritance and not as an argument
-		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, q_data)) as pool:
+		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, updaterQueue)) as pool:
 			#Initialise the list that will contain the results of all the processes
 			multiple_results=[]
 			
@@ -925,7 +949,7 @@ if __name__ == '__main__':
 	
 	sprint("Compressing the results")
 	
-	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(s_data_keys,)) as pool:
+	with multiprocessing.Pool(cpus, initializer=init_gzCompress, initargs=(str(output), outputLock)) as pool:
 		multiple_results = []
 		
 		for i in range(cpus):
@@ -939,22 +963,21 @@ if __name__ == '__main__':
 		pFinished = [0]*len(multiple_results)
 		sprint(sum(pFinished), "/", len(pFinished), end="\r")
 		
-		with open(args.output, 'wb') as fh:
-			while True:
-				for index, res in enumerate(multiple_results):
-					if((res.ready()==True) and (pFinished[index] == 0)):
-						fh.write(res.get())
-						pFinished[index] = int(res.ready())
-						sprint(sum(pFinished), "/", len(pFinished), end="\r")
-				if sum(pFinished) == len(multiple_results):
-					pool.join()
-					sprint(sum(pFinished), "/", len(pFinished), " DONE")
-					break
-				else:
-					time.sleep(1)
-			fh.close()
-			#sprint(readsCounter[:])
+		while True:
+			for index, res in enumerate(multiple_results):
+				if((res.ready()==True) and (pFinished[index] == 0)):
+					res.get()
+					pFinished[index] = int(res.ready())
+					sprint(sum(pFinished), "/", len(pFinished), end="\r")
+			if sum(pFinished) == len(multiple_results):
+				pool.join()
+				sprint(sum(pFinished), "/", len(pFinished), " DONE")
+				break
+			else:
+				time.sleep(1)
+		#sprint(readsCounter[:])
 		del multiple_results
+	'''
 	s_data_keys = None
 	s_data.clear()
 	del s_data_keys
@@ -962,12 +985,8 @@ if __name__ == '__main__':
 	sprint("Releasing memory: Main thread", end="\r")
 	gc.collect()
 	sprint("Done: Main thread", end="\r")
-	
+	'''
 	sprint("Generating error table")
-	output = pathlib.Path(args.output)
-	error_dir = str(output.parent) + "/" + output.name[:(-len(''.join(output.suffixes)))] + "_error"
-	if(os.path.isdir(error_dir) == False):
-		os.mkdir(error_dir)
 	
 	with open(error_dir + ".csv", 'w', newline='') as csvfile:
 		spamwriter = csv.writer(csvfile, delimiter=';',	quotechar='"', quoting=csv.QUOTE_MINIMAL)
