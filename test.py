@@ -514,13 +514,14 @@ class updateShared:
 		
 	def stop(self):
 		#print("updateshared stop start")
-		sprint("Waiting for the queues to be empty")
+		sprint("Waiting for dict updates to finish")
 		while updaterQueue.empty() == False:
-			sprint("Empty: ", updaterQueue.empty(), " Size: ", end="\r")
-			time.sleep(0.1)
+			#sprint("Empty: ", updaterQueue.empty(), " Size: ", end="\r")
+			time.sleep(1)
 		#print("Queues empty")
-		sprint("Trying to stop updater", end="\r")
+		sprint("Trying to stop updater")
 		self._running = False
+		self._updater.join()
 		#sprint("Updater stopped")
 
 	def getData(self):
@@ -932,7 +933,7 @@ if __name__ == '__main__':
 				
 				#The Eread(s) in updater.getErrors() needs to be added to s_error too.
 				for Eread in Ereads:
-					s_error[Ename].setdefault(Eread, set()).add(filename)
+					s_error[Ename].setdefault(Eread, set()).add(input_filename)
 				
 				#error increases in 1 for the transfered read from s_data. The one in updater.getErrors() was already taken into account
 				readsCounter[(cpus*5) + 3] += 1
@@ -949,7 +950,7 @@ if __name__ == '__main__':
 						if deduped:
 							#If Eread is either identical or contained in s_Eread
 							if(deduped[0] == 1):
-								s_error[Ename][s_Eread].add(filename)
+								s_error[Ename][s_Eread].add(input_filename)
 							#If Eread and s_Eread have been extended.
 							elif(deduped[0] == 2):
 								#Add the deduped read to the s_error with all the filenames from the s_Eread
@@ -957,22 +958,22 @@ if __name__ == '__main__':
 								#Erased s_Eread as it has been superceeded by the deduped one
 								s_error[Ename].pop(s_Eread)
 								#Add the filename for Eread to s_error
-								s_error[Ename][deduped[1]].add(filename)
+								s_error[Ename][deduped[1]].add(input_filename)
 							else:
 								print("Error!!")
 								exit()
 							break
 					if deduped == None:
 						#Eread is totally new for Ename, add it
-						s_error[Ename].setdefault(Eread, set()).add(filename)
+						s_error[Ename].setdefault(Eread, set()).add(input_filename)
 			else:
 				#If Ename not in s_data or s_error, error appeared within the file itself (p_data or u_data)
 				#Add a totally new entry to s_error
 				for Eread in Ereads:
-					s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(filename)
+					s_error.setdefault(Ename,dict()).setdefault(Eread, set()).add(input_filename)
 		sprint("Shared dictionaries updated")
 		sprint("File processed succesfully")
-		previous_filenames.add(filename)
+		previous_filenames.add(input_filename)
 		sprint("Releasing memory: Main thread", end="\r")
 		gc.collect()
 		sprint("Done: Main thread", end="\r")
@@ -1032,25 +1033,28 @@ if __name__ == '__main__':
 		for Ename, Ereads in s_error.items():
 			for Eread, Efiles in Ereads.items():
 				row = [Ename.decode("UTF-8"), Eread[0].decode("UTF-8")]
-				for filename in previous_filenames:
-					if filename in Efiles:
+				for input_filename in previous_filenames:
+					if input_filename in Efiles:
 						row.append("X")
 					else:
 						row.append(" ")
 				spamwriter.writerow(row)
 	sprint("Generating error files")
 	error_files = dict()
-	for filename in previous_filenames:
-		error_files[filename] = gzip.open(error_dir + "/" + filename, 'wb')
-	sprint(error_files)
+	
+	for input_filename in previous_filenames:
+		error_files[input_filename] = gzip.open(error_dir + "/" + input_filename + "fastq.gz", 'wb')
+	
+	#sprint(error_files)
+	
 	for Ename, Ereads in s_error.items():
 			for Eread, Efiles in Ereads.items():
 				for Efile in Efiles:
 					error_files[Efile].write(Ename+b"\n"+Eread[0]+b"\n+\n"+Eread[1]+b"\n")
 	del s_error	
 	
-	for filename in error_files:
-		error_files[filename].close()
+	for input_filename in previous_filenames:
+		error_files[input_filename].close()
 	
 	sprint (time.strftime("%c"))
 	sprint("RAM: ", humanbytes(py.memory_info().rss))
