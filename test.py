@@ -535,10 +535,10 @@ class updateShared:
 	def size(self):
 		return (sys.getsizeof(self.u_data), sys.getsizeof(self.u_error))
 	
-	def save(self, filepath)
+	def save(self, filepath):
 		pickle.dump((self.u_data, self.u_error), filepath, protocol=4)
 	
-	def load(self, filepath)
+	def load(self, filepath):
 		self.u_data, self.u_error = pickle.load(filepath)
 	
 	def _updateShared(self):
@@ -846,59 +846,74 @@ if __name__ == '__main__':
 	
 	previous_filenames = set()
 	for filepath in filepaths:
-		filename = pathlib.Path(filepath).name
-		sprint("Processing file: ", filename)
-		#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
-		#We pass the array to store the reads counted with an initialiser function so the different
-		#processes get it by inheritance and not as an argument
-		with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, updaterQueue)) as pool:
-			#Initialise the list that will contain the results of all the processes
-			multiple_results=[]
+		input = pathlib.Path(filepath)
+		input_dir = str(input.parent)
+		input_fileext = ''.join(input.suffixes)
+		if "gz" in input_fileext:
+			sprint("Gzip input file detected")
+		elif input_fileext == "":
+			sprint("no input file extension")
+			exit()
+		input_filename = input.name[:(-len(input_fileext))]
+
+		sprint("Processing file: ", input_filename)
+		if os.path.isfile(working_dir + "/" + input_filename + ".updict"):
+			sprint("Loading saved state for ", input_filename)
+			updater.load(working_dir + "/" + input_filename + ".updict")
+		else:
+			#Create a pool of cpus+1 processes to accomodate the extra chunk in case it happens
+			#We pass the array to store the reads counted with an initialiser function so the different
+			#processes get it by inheritance and not as an argument
+			with multiprocessing.Pool(processes=cpus, maxtasksperchild=1, initializer=init_processReads, initargs=(readsCounter, readsCounterLock, updaterQueue)) as pool:
+				#Initialise the list that will contain the results of all the processes
+				multiple_results=[]
+				
+				sprint("RAM: ", humanbytes(py.memory_info().rss))
+				for chunk in decompressChunks(filepath, buffersize):
+					#sprint("Sending job ", len(multiple_results)+1)
+					#Send a new process for the chunk
+					#sprint(chunk)
+					#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
+					#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
+					multiple_results.append(pool.apply_async(processReads,args=(chunk, minoverlap)))
+					if counterActive.value == False:
+						counterActive.value = True
+						updater.start()
+				sprint(len(multiple_results), " jobs succesfully sent")
+				#print("Closing pool")
+				pool.close()
+				sprint("Releasing memory: Main thread", end="\r")
+				gc.collect()
+				sprint("Done: Main thread", end="\r")
+				sprint("Waiting for results to be ready")
+				
+				pFinished = [0]*len(multiple_results)
+				sprint(sum(pFinished), "/", len(pFinished), end="\r")
+				
+				while True:
+					for index, res in enumerate(multiple_results):
+						if((res.ready()==True) and (pFinished[index] == 0)):
+							pFinished[index] = int(res.ready())
+							res.get() #Force errors in processes to be shown
+							sprint(sum(pFinished), "/", len(pFinished), end="\r")
+					if sum(pFinished) == len(multiple_results):
+						sprint(sum(pFinished), "/", len(pFinished), " DONE")
+						#sprint("Joining pool")
+						pool.join()
+						break
+					else:
+						time.sleep(1)
+				
+				#sprint(readsCounter[:])
+				del multiple_results
 			
-			sprint("RAM: ", humanbytes(py.memory_info().rss))
-			for chunk in decompressChunks(filepath, buffersize):
-				#sprint("Sending job ", len(multiple_results)+1)
-				#Send a new process for the chunk
-				#sprint(chunk)
-				#byteString = memoryview(loadedFASTQ.value)[chunk[0]:chunk[1]] #chunk[1]+1 to include the last character which is \n
-				#sprint(byteString[0:10].tobytes(), " -------- ", byteString[-10:-1].tobytes())
-				multiple_results.append(pool.apply_async(processReads,args=(chunk, minoverlap)))
-				if counterActive.value == False:
-					counterActive.value = True
-					updater.start()
-			sprint(len(multiple_results), " jobs succesfully sent")
-			#print("Closing pool")
-			pool.close()
 			sprint("Releasing memory: Main thread", end="\r")
 			gc.collect()
 			sprint("Done: Main thread", end="\r")
-			sprint("Waiting for results to be ready")
-			
-			pFinished = [0]*len(multiple_results)
-			sprint(sum(pFinished), "/", len(pFinished), end="\r")
-			
-			while True:
-				for index, res in enumerate(multiple_results):
-					if((res.ready()==True) and (pFinished[index] == 0)):
-						pFinished[index] = int(res.ready())
-						res.get() #Force errors in processes to be shown
-						sprint(sum(pFinished), "/", len(pFinished), end="\r")
-				if sum(pFinished) == len(multiple_results):
-					sprint(sum(pFinished), "/", len(pFinished), " DONE")
-					#sprint("Joining pool")
-					pool.join()
-					break
-				else:
-					time.sleep(1)
-			
-			#sprint(readsCounter[:])
-			del multiple_results
-		
-		sprint("Releasing memory: Main thread", end="\r")
-		gc.collect()
-		sprint("Done: Main thread", end="\r")
-		updater.stop()
-		counterActive.value = False
+			updater.stop()
+			sprint("Saving state for ", input_filename)
+			updater.save(working_dir + "/" + input_filename + ".updict")
+			counterActive.value = False
 		
 		sprint("Updating the shared dictionaries")
 		sprint("Length: ", updater.length())
@@ -1037,3 +1052,6 @@ if __name__ == '__main__':
 	
 	sprint (time.strftime("%c"))
 	sprint("RAM: ", humanbytes(py.memory_info().rss))
+	
+
+
